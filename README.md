@@ -191,6 +191,24 @@ url = "http://bridge:6710/mcp"
 | `qq_search_messages` | Search stored text messages in one conversation. |
 | `qq_get_conversation_state` | Return bridge state and counts for one conversation. |
 | `qq_download_media` | Download a stored image/file attachment into the local media cache. |
+| `qq_group_admin_help` | Explain grouped QQ administration tools and actions. |
+| `qq_group_member_admin` | Kick, mute/unmute, set admin, set card, set special title, or list muted members. |
+| `qq_group_request_admin` | Read or handle group join/invite requests. |
+| `qq_group_settings_admin` | Change group name/avatar, whole-group mute, or make the bot leave the group. |
+| `qq_group_message_admin` | Recall messages, manage essence messages, check @all quota, or mark group read. |
+| `qq_group_notice_admin` | Send, list, or delete group notices. |
+| `qq_group_file_admin` | Manage group files and folders. |
+| `qq_group_info_admin` | Read group, member, and honor information. |
+
+### Group Administration
+
+Group administration tools are grouped to keep the MCP tool list small. Call
+`qq_group_admin_help` to discover action names and required fields. Disbanding groups is
+intentionally not implemented; `leave_group` only makes the bot leave the group.
+
+All group-specific administration tools reject `group_id` values outside
+`qq.allowedGroupIds` when that allowlist is configured. Actions that mutate group state
+require `confirm: true`; use that only after the user explicitly asks for the operation.
 
 ### Mentions, Images, and Replies
 

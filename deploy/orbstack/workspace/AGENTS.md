@@ -25,5 +25,6 @@
 - 群文件示例：`qq_send_group_file({ group_id, file: "/workspace/result.zip", name: "result.zip" })`。
 - 私聊文件示例：`qq_send_private_file({ user_id: sender_user_id, file: "/workspace/result.txt", name: "result.txt" })`。
 - 如果需要上下文，再用 `qq_get_unread_messages`、`qq_get_recent_messages`、`qq_get_message`、`qq_search_messages` 或 `qq_download_media` 拉取历史和附件；如果当前消息已经足够清楚，就直接回复。
+- 群管理操作使用 `qq_group_admin_help` 和 `qq_group_*_admin` 分组工具。只有用户明确要求群管动作时才调用；解散群不支持；踢人、禁言、设管理员、改群设置、撤回、公告、群文件删除等会改变群状态的 action 必须传 `confirm: true`。
 - 只有在用户明确要求不要回复、消息明显不需要回复、或工具/权限不可用时，才可以不发送 QQ 回复；这种例外要在内部判断清楚，不要默认沉默。
 - 不要把面向用户的回复只写在普通文本输出里；那不会到达 QQ。必须通过 QQ MCP send 工具发回 QQ。

@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { AstralAppServerClient } from "./astral.js";
 import { dashboardHtml, dashboardState } from "./dashboard.js";
 import { ExternalEventBatcher } from "./event_batcher.js";
+import { registerGroupAdminTools } from "./group_admin_tools.js";
 import { error, log } from "./logger.js";
 import { ensureAttachmentDownloaded } from "./media.js";
 import type { OneBotClient } from "./onebot.js";
@@ -261,6 +262,8 @@ function createBridgeMcpServer(
       return structured(response);
     },
   );
+
+  registerGroupAdminTools(server, config, onebot);
 
   return server;
 }
