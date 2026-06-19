@@ -46,6 +46,9 @@ export interface ExternalEventsConfig {
   path: string;
   authToken: string | null;
   maxBodyBytes: number;
+  debounceMs: number;
+  maxBatchEvents: number;
+  maxBatchBodyChars: number;
 }
 
 export interface StorageConfig {

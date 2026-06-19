@@ -35,6 +35,9 @@ const defaultConfig: BridgeConfig = {
     path: "/api/events",
     authToken: null,
     maxBodyBytes: 64 * 1024,
+    debounceMs: 2_000,
+    maxBatchEvents: 20,
+    maxBatchBodyChars: 6_000,
   },
   storage: {
     dbPath: "./data/astral-bridge.db",
@@ -97,6 +100,14 @@ function applyEnvOverrides(config: BridgeConfig): void {
   config.externalEvents.path = process.env.ASTRAL_BRIDGE_EVENT_API_PATH ?? config.externalEvents.path;
   config.externalEvents.authToken =
     process.env.ASTRAL_BRIDGE_EVENT_API_TOKEN ?? config.externalEvents.authToken;
+  config.externalEvents.debounceMs =
+    parsePositiveInteger(process.env.ASTRAL_BRIDGE_EVENT_API_DEBOUNCE_MS) ?? config.externalEvents.debounceMs;
+  config.externalEvents.maxBatchEvents =
+    parsePositiveInteger(process.env.ASTRAL_BRIDGE_EVENT_API_MAX_BATCH_EVENTS)
+    ?? config.externalEvents.maxBatchEvents;
+  config.externalEvents.maxBatchBodyChars =
+    parsePositiveInteger(process.env.ASTRAL_BRIDGE_EVENT_API_MAX_BATCH_BODY_CHARS)
+    ?? config.externalEvents.maxBatchBodyChars;
 }
 
 function validateConfig(config: BridgeConfig): void {
@@ -120,6 +131,18 @@ function validateConfig(config: BridgeConfig): void {
   }
   if (!Number.isInteger(config.externalEvents.maxBodyBytes) || config.externalEvents.maxBodyBytes <= 0) {
     throw new Error("externalEvents.maxBodyBytes must be a positive integer");
+  }
+  if (!Number.isInteger(config.externalEvents.debounceMs) || config.externalEvents.debounceMs <= 0) {
+    throw new Error("externalEvents.debounceMs must be a positive integer");
+  }
+  if (!Number.isInteger(config.externalEvents.maxBatchEvents) || config.externalEvents.maxBatchEvents <= 0) {
+    throw new Error("externalEvents.maxBatchEvents must be a positive integer");
+  }
+  if (
+    !Number.isInteger(config.externalEvents.maxBatchBodyChars)
+    || config.externalEvents.maxBatchBodyChars <= 0
+  ) {
+    throw new Error("externalEvents.maxBatchBodyChars must be a positive integer");
   }
   config.qq.allowedGroupIds = normalizeIdList(config.qq.allowedGroupIds);
   config.qq.allowedPrivateUserIds = normalizeIdList(config.qq.allowedPrivateUserIds);
@@ -153,6 +176,17 @@ function parseBoolean(value: string | undefined): boolean | null {
     return false;
   }
   return null;
+}
+
+function parsePositiveInteger(value: string | undefined): number | null {
+  if (value == null || value.trim() === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
 }
 
 function normalizeIdList(values: string[]): string[] {

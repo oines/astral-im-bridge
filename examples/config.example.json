@@ -30,7 +30,10 @@
     "enabled": true,
     "path": "/api/events",
     "authToken": "REPLACE_WITH_EVENT_API_TOKEN",
-    "maxBodyBytes": 65536
+    "maxBodyBytes": 65536,
+    "debounceMs": 2000,
+    "maxBatchEvents": 20,
+    "maxBatchBodyChars": 6000
   },
   "storage": {
     "dbPath": "./data/astral-bridge.db",

@@ -1,4 +1,5 @@
 import type { AstralAppServerClient } from "./astral.js";
+import type { ExternalEventBatcher } from "./event_batcher.js";
 import { recentLogs } from "./logger.js";
 import type { OneBotClient } from "./onebot.js";
 import type { MessageStore } from "./store.js";
@@ -11,6 +12,7 @@ export function dashboardState(
   onebot: OneBotClient,
   astral: AstralAppServerClient,
   store: MessageStore,
+  eventBatcher?: ExternalEventBatcher,
 ): Record<string, unknown> {
   return {
     now: new Date().toISOString(),
@@ -31,6 +33,10 @@ export function dashboardState(
         schemaPath: `${config.externalEvents.path}/schema`,
         authRequired: Boolean(config.externalEvents.authToken),
         maxBodyBytes: config.externalEvents.maxBodyBytes,
+        debounceMs: config.externalEvents.debounceMs,
+        maxBatchEvents: config.externalEvents.maxBatchEvents,
+        maxBatchBodyChars: config.externalEvents.maxBatchBodyChars,
+        batcher: eventBatcher?.status() ?? null,
       },
     },
     routing: {
@@ -253,6 +259,9 @@ export function dashboardHtml(): string {
         ['path', state.services.externalEvents.path],
         ['schema', state.services.externalEvents.schemaPath],
         ['auth required', state.services.externalEvents.authRequired],
+        ['pending batch', state.services.externalEvents.batcher ? state.services.externalEvents.batcher.pendingEvents : 0],
+        ['dropped batch', state.services.externalEvents.batcher ? state.services.externalEvents.batcher.droppedEvents : 0],
+        ['batch window', state.services.externalEvents.debounceMs + 'ms'],
       ].map(([k,v]) => '<div class="row"><div class="label">' + esc(k) + '</div><div><code>' + esc(v) + '</code></div></div>').join('');
       qs('conversations').innerHTML = table(['type', 'target', 'count', 'latest'], state.conversations.map((c) => [
         esc(c.sourceType),

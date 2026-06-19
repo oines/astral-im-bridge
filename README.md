@@ -96,7 +96,10 @@ Start from `examples/config.example.json`:
     "enabled": true,
     "path": "/api/events",
     "authToken": "REPLACE_WITH_EVENT_API_TOKEN",
-    "maxBodyBytes": 65536
+    "maxBodyBytes": 65536,
+    "debounceMs": 2000,
+    "maxBatchEvents": 20,
+    "maxBatchBodyChars": 6000
   },
   "storage": {
     "dbPath": "./data/astral-bridge.db",
@@ -121,6 +124,9 @@ Environment overrides:
 | `ASTRAL_BRIDGE_EVENT_API_ENABLED` | Enable or disable the external event API. |
 | `ASTRAL_BRIDGE_EVENT_API_PATH` | External event API path, default `/api/events`. |
 | `ASTRAL_BRIDGE_EVENT_API_TOKEN` | Optional bearer token required by the external event API. |
+| `ASTRAL_BRIDGE_EVENT_API_DEBOUNCE_MS` | Window used to merge attention-worthy external events before forwarding to Astral. |
+| `ASTRAL_BRIDGE_EVENT_API_MAX_BATCH_EVENTS` | Maximum external events included in one merged Astral turn. Extra events in the same window are counted and omitted. |
+| `ASTRAL_BRIDGE_EVENT_API_MAX_BATCH_BODY_CHARS` | Maximum merged event body characters sent to Astral. Longer batches are truncated. |
 
 `recordUntriggered` controls whether non-triggering messages from allowed conversations
 are stored. Keeping it enabled lets the agent fetch surrounding context without forwarding
@@ -247,9 +253,11 @@ Content-Type: application/json
 }
 ```
 
-The bridge formats the event as an external system event and submits it to the fixed
-Astral thread using the same queue as QQ messages. Set `wants_agent_attention` to `false`
-to validate and accept an event without forwarding it into Astral.
+The bridge queues attention-worthy events, merges short bursts into one bounded Astral
+turn, and submits that merged event to the fixed Astral thread using the same queue as QQ
+messages. Set `wants_agent_attention` to `false` to validate and accept an event without
+forwarding it into Astral. Batching is controlled by `externalEvents.debounceMs`,
+`externalEvents.maxBatchEvents`, and `externalEvents.maxBatchBodyChars`.
 
 Request fields:
 

@@ -7,6 +7,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import type { AstralAppServerClient } from "./astral.js";
 import { dashboardHtml, dashboardState } from "./dashboard.js";
+import { ExternalEventBatcher } from "./event_batcher.js";
 import { error, log } from "./logger.js";
 import { ensureAttachmentDownloaded } from "./media.js";
 import type { OneBotClient } from "./onebot.js";
@@ -271,6 +272,10 @@ async function startHttpMcpServer(
   astral: AstralAppServerClient,
 ): Promise<void> {
   const app = createMcpExpressApp({ host: config.mcp.host });
+  const externalEventBatcher = new ExternalEventBatcher(
+    config.externalEvents,
+    (event) => astral.submitExternalEvent(event),
+  );
 
   app.get("/healthz", (_req: IncomingMessage, res: ServerResponse) => {
     writeJson(res, 200, { ok: true });
@@ -287,7 +292,7 @@ async function startHttpMcpServer(
   });
 
   app.get("/api/dashboard/state", (_req: IncomingMessage, res: ServerResponse) => {
-    writeJson(res, 200, dashboardState(config, onebot, astral, store));
+    writeJson(res, 200, dashboardState(config, onebot, astral, store, externalEventBatcher));
   });
 
   if (config.externalEvents.enabled) {
@@ -316,17 +321,21 @@ async function startHttpMcpServer(
         }
 
         const event = normalizeExternalEvent(parsed.data);
+        let batch: unknown = null;
         if (parsed.data.wants_agent_attention) {
-          log("forwarding external event to astral", {
+          batch = externalEventBatcher.enqueue(event);
+          log("queued external event for astral", {
             source: event.source,
             eventType: event.eventType,
             eventId: event.id,
+            batch,
           });
-          await astral.submitExternalEvent(event);
         }
         writeJson(res, 202, {
           ok: true,
           accepted_for_astral: parsed.data.wants_agent_attention,
+          queued_for_astral: parsed.data.wants_agent_attention,
+          batch,
           event,
         });
       } catch (err) {
@@ -491,6 +500,7 @@ function externalEventApiSchema(config: BridgeConfig): Record<string, unknown> {
       [config.externalEvents.path]: {
         post: {
           summary: "Submit a generic external event to the fixed Astral session.",
+          description: "Attention-worthy events are accepted immediately, debounced, merged into bounded batches, and then forwarded to Astral asynchronously.",
           security: config.externalEvents.authToken ? [{ bearerAuth: [] }] : [],
           requestBody: {
             required: true,
@@ -631,11 +641,44 @@ function externalEventApiSchema(config: BridgeConfig): Record<string, unknown> {
         },
         ExternalEventResponse: {
           type: "object",
-          required: ["ok", "accepted_for_astral", "event"],
+          required: ["ok", "accepted_for_astral", "queued_for_astral", "batch", "event"],
           properties: {
             ok: { type: "boolean" },
             accepted_for_astral: { type: "boolean" },
+            queued_for_astral: {
+              type: "boolean",
+              description: "True when the event was queued for the debounced Astral batcher.",
+            },
+            batch: {
+              anyOf: [
+                { $ref: "#/components/schemas/ExternalEventBatchState" },
+                { type: "null" },
+              ],
+            },
             event: { $ref: "#/components/schemas/ExternalEvent" },
+          },
+        },
+        ExternalEventBatchState: {
+          type: "object",
+          required: [
+            "pendingEvents",
+            "droppedEvents",
+            "debounceMs",
+            "maxBatchEvents",
+            "maxBatchBodyChars",
+            "nextFlushAt",
+          ],
+          properties: {
+            pendingEvents: { type: "integer", minimum: 0 },
+            droppedEvents: {
+              type: "integer",
+              minimum: 0,
+              description: "Events omitted from the pending batch after maxBatchEvents was reached.",
+            },
+            debounceMs: { type: "integer", minimum: 1 },
+            maxBatchEvents: { type: "integer", minimum: 1 },
+            maxBatchBodyChars: { type: "integer", minimum: 1 },
+            nextFlushAt: { type: "string", format: "date-time" },
           },
         },
         ExternalEvent: {
