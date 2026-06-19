@@ -1,0 +1,7 @@
+model = "gpt-5-codex"
+model_provider = "openai"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[mcp_servers.qq]
+url = "http://bridge:6710/mcp"

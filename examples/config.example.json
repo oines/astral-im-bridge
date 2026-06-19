@@ -1,0 +1,34 @@
+{
+  "onebot": {
+    "host": "127.0.0.1",
+    "port": 6701,
+    "path": "/onebot/v11/ws",
+    "accessToken": null,
+    "actionTimeoutMs": 10000
+  },
+  "mcp": {
+    "transport": "stdio",
+    "host": "127.0.0.1",
+    "port": 6710,
+    "path": "/mcp"
+  },
+  "astral": {
+    "appServerUrl": "ws://127.0.0.1:4222",
+    "authToken": null,
+    "threadId": "REPLACE_WITH_FIXED_ASTRAL_THREAD_ID",
+    "cwd": null,
+    "model": null,
+    "includeImageInputs": true
+  },
+  "qq": {
+    "botUserId": "REPLACE_WITH_BOT_QQ",
+    "allowedGroupIds": ["REPLACE_GROUP_ID"],
+    "allowedPrivateUserIds": ["REPLACE_USER_ID"],
+    "recordUntriggered": true
+  },
+  "storage": {
+    "dbPath": "./data/astral-bridge.db",
+    "mediaDir": "./media",
+    "downloadMedia": false
+  }
+}

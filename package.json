@@ -1,0 +1,30 @@
+{
+  "name": "astral-bridge",
+  "version": "0.1.0",
+  "description": "QQ/NapCat OneBot v11 bridge for a fixed Astral Code app-server session with MCP tools.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "astral-bridge": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ws": "^8.21.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=26"
+  }
+}

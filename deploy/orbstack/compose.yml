@@ -1,0 +1,77 @@
+name: astral-im-bridge
+
+services:
+  bridge:
+    build:
+      context: ./astral-bridge-src
+    image: astral-bridge:local
+    restart: unless-stopped
+    environment:
+      ASTRAL_BRIDGE_CONFIG: /config/bridge.json
+      ASTRAL_BRIDGE_APP_SERVER_URL: ws://astral-code:4222
+      ASTRAL_BRIDGE_APP_SERVER_AUTH_TOKEN: ${ASTRAL_APP_SERVER_TOKEN}
+      ASTRAL_BRIDGE_THREAD_ID: ${ASTRAL_THREAD_ID}
+      ASTRAL_BRIDGE_BOT_QQ: ${QQ_BOT_ID}
+      ASTRAL_BRIDGE_ALLOWED_GROUP_IDS: ${QQ_ALLOWED_GROUP_IDS}
+      ASTRAL_BRIDGE_ALLOWED_PRIVATE_USER_IDS: ${QQ_ALLOWED_PRIVATE_USER_IDS}
+      ASTRAL_BRIDGE_MCP_TRANSPORT: http
+    volumes:
+      - ./bridge/config:/config
+      - ./bridge/data:/app/data
+      - ./bridge/media:/app/media
+    ports:
+      - "${PUBLISH_HOST:-127.0.0.1}:${BRIDGE_ONEBOT_PORT:-6701}:6701"
+      - "${PUBLISH_HOST:-127.0.0.1}:${BRIDGE_MCP_PORT:-6710}:6710"
+
+  astral-code:
+    build:
+      context: .
+      dockerfile: docker/astral-code.Dockerfile
+    image: astral-code-runtime:local
+    restart: unless-stopped
+    depends_on:
+      - bridge
+    environment:
+      ASTRAL_HOME: /astral-home
+      CODEX_HOME: /astral-home
+      ASTRAL_APP_SERVER_TOKEN: ${ASTRAL_APP_SERVER_TOKEN}
+      ASTRAL_API_KEY: ${ASTRAL_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ASTRAL_BUILD_PROFILE: ${ASTRAL_BUILD_PROFILE:-release}
+      CARGO_HOME: /cargo-home
+      CARGO_TARGET_DIR: /cargo-target
+      CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-6}
+      CARGO_PROFILE_RELEASE_LTO: ${CARGO_PROFILE_RELEASE_LTO:-false}
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-16}
+      CARGO_PROFILE_RELEASE_DEBUG: ${CARGO_PROFILE_RELEASE_DEBUG:-none}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./astral-home:/astral-home
+      - ./workspace:/workspace
+      - ./astral-bin:/opt/astral-bin
+      - ./astral-code-src:/opt/astral-code
+      - ./cargo-home:/cargo-home
+      - ./astral-target:/cargo-target
+      - ./bridge/media:/app/media:ro
+    ports:
+      - "${PUBLISH_HOST:-127.0.0.1}:${ASTRAL_APP_SERVER_PORT:-4222}:4222"
+      - "${PUBLISH_HOST:-127.0.0.1}:30010-30019:30010-30019"
+
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    restart: unless-stopped
+    depends_on:
+      - bridge
+    environment:
+      ACCOUNT: ${QQ_BOT_ID}
+      NAPCAT_UID: ${NAPCAT_UID:-501}
+      NAPCAT_GID: ${NAPCAT_GID:-20}
+    mac_address: ${NAPCAT_MAC_ADDRESS:-02:42:ac:11:00:10}
+    ports:
+      - "${PUBLISH_HOST:-127.0.0.1}:${NAPCAT_WEBUI_PORT:-3001}:3001"
+      - "${PUBLISH_HOST:-127.0.0.1}:${NAPCAT_HTTP_PORT:-6099}:6099"
+    volumes:
+      - ./napcat/config:/app/napcat/config
+      - ./napcat/ntqq:/app/.config/QQ
+      - ./workspace:/workspace:ro
+      - ./bridge/media:/app/media:ro
