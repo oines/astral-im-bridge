@@ -152,6 +152,7 @@ function createBridgeMcpServer(
     async (args) => structured({
       bot_user_id: config.qq.botUserId,
       configured_groups: config.qq.allowedGroupIds,
+      always_trigger_groups: config.qq.alwaysTriggerGroupIds,
       configured_private_users: config.qq.allowedPrivateUserIds,
       conversation: store.conversationState(args.target_type as SourceType, args.target_id),
     }),

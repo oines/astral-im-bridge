@@ -43,6 +43,7 @@ export function dashboardState(
       fixedThreadId: config.astral.threadId,
       qqBotUserId: config.qq.botUserId,
       allowedGroupIds: config.qq.allowedGroupIds,
+      alwaysTriggerGroupIds: config.qq.alwaysTriggerGroupIds,
       allowedPrivateUserIds: config.qq.allowedPrivateUserIds,
       recordUntriggered: config.qq.recordUntriggered,
     },
@@ -252,6 +253,7 @@ export function dashboardHtml(): string {
         ['thread', state.routing.fixedThreadId],
         ['bot qq', state.routing.qqBotUserId],
         ['groups', state.routing.allowedGroupIds.join(', ')],
+        ['always trigger groups', state.routing.alwaysTriggerGroupIds.join(', ')],
         ['private', state.routing.allowedPrivateUserIds.join(', ')],
       ].map(([k,v]) => '<div class="row"><div class="label">' + esc(k) + '</div><div><code>' + esc(v) + '</code></div></div>').join('');
       qs('events').innerHTML = [

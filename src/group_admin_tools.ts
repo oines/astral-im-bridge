@@ -643,6 +643,7 @@ function assertAllowedGroup(config: BridgeConfig, groupId: string): void {
   if (
     config.qq.allowedGroupIds.length > 0
     && !config.qq.allowedGroupIds.includes(normalizedGroupId)
+    && !config.qq.alwaysTriggerGroupIds.includes(normalizedGroupId)
   ) {
     throw new Error(`group_id ${normalizedGroupId} is not in configured allowedGroupIds`);
   }

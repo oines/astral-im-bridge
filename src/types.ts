@@ -1,5 +1,5 @@
 export type SourceType = "group" | "private";
-export type TriggerKind = "group_mention" | "group_reply" | "private_message" | "none";
+export type TriggerKind = "group_mention" | "group_reply" | "group_always" | "private_message" | "none";
 
 export interface BridgeConfig {
   onebot: OneBotConfig;
@@ -37,6 +37,7 @@ export interface AstralConfig {
 export interface QqConfig {
   botUserId: string;
   allowedGroupIds: string[];
+  alwaysTriggerGroupIds: string[];
   allowedPrivateUserIds: string[];
   recordUntriggered: boolean;
 }

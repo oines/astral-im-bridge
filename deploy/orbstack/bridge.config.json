@@ -23,6 +23,7 @@
   "qq": {
     "botUserId": "SET_BY_ASTRAL_BRIDGE_BOT_QQ_ENV",
     "allowedGroupIds": [],
+    "alwaysTriggerGroupIds": [],
     "allowedPrivateUserIds": [],
     "recordUntriggered": true
   },

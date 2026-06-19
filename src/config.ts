@@ -27,6 +27,7 @@ const defaultConfig: BridgeConfig = {
   qq: {
     botUserId: "",
     allowedGroupIds: [],
+    alwaysTriggerGroupIds: [],
     allowedPrivateUserIds: [],
     recordUntriggered: true,
   },
@@ -92,6 +93,8 @@ function applyEnvOverrides(config: BridgeConfig): void {
   config.astral.authToken = process.env.ASTRAL_BRIDGE_APP_SERVER_AUTH_TOKEN ?? config.astral.authToken;
   config.qq.botUserId = process.env.ASTRAL_BRIDGE_BOT_QQ ?? config.qq.botUserId;
   config.qq.allowedGroupIds = envList("ASTRAL_BRIDGE_ALLOWED_GROUP_IDS") ?? config.qq.allowedGroupIds;
+  config.qq.alwaysTriggerGroupIds =
+    envList("ASTRAL_BRIDGE_ALWAYS_TRIGGER_GROUP_IDS") ?? config.qq.alwaysTriggerGroupIds;
   config.qq.allowedPrivateUserIds =
     envList("ASTRAL_BRIDGE_ALLOWED_PRIVATE_USER_IDS") ?? config.qq.allowedPrivateUserIds;
   config.mcp.transport = parseMcpTransport(process.env.ASTRAL_BRIDGE_MCP_TRANSPORT) ?? config.mcp.transport;
@@ -145,6 +148,7 @@ function validateConfig(config: BridgeConfig): void {
     throw new Error("externalEvents.maxBatchBodyChars must be a positive integer");
   }
   config.qq.allowedGroupIds = normalizeIdList(config.qq.allowedGroupIds);
+  config.qq.alwaysTriggerGroupIds = normalizeIdList(config.qq.alwaysTriggerGroupIds);
   config.qq.allowedPrivateUserIds = normalizeIdList(config.qq.allowedPrivateUserIds);
   config.qq.botUserId = String(config.qq.botUserId);
 }

@@ -23,6 +23,7 @@
   "qq": {
     "botUserId": "REPLACE_WITH_BOT_QQ",
     "allowedGroupIds": ["REPLACE_GROUP_ID"],
+    "alwaysTriggerGroupIds": [],
     "allowedPrivateUserIds": ["REPLACE_USER_ID"],
     "recordUntriggered": true
   },

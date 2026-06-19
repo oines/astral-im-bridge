@@ -89,6 +89,7 @@ Start from `examples/config.example.json`:
   "qq": {
     "botUserId": "REPLACE_WITH_BOT_QQ",
     "allowedGroupIds": ["REPLACE_GROUP_ID"],
+    "alwaysTriggerGroupIds": [],
     "allowedPrivateUserIds": ["REPLACE_USER_ID"],
     "recordUntriggered": true
   },
@@ -119,6 +120,7 @@ Environment overrides:
 | `ASTRAL_BRIDGE_THREAD_ID` | Fixed Astral thread/session id. |
 | `ASTRAL_BRIDGE_BOT_QQ` | Bot QQ user id. |
 | `ASTRAL_BRIDGE_ALLOWED_GROUP_IDS` | Comma-separated allowed group ids. |
+| `ASTRAL_BRIDGE_ALWAYS_TRIGGER_GROUP_IDS` | Comma-separated group ids where every non-bot message is forwarded to Astral. |
 | `ASTRAL_BRIDGE_ALLOWED_PRIVATE_USER_IDS` | Comma-separated allowed private user ids. |
 | `ASTRAL_BRIDGE_MCP_TRANSPORT` | `stdio` or `http`. |
 | `ASTRAL_BRIDGE_EVENT_API_ENABLED` | Enable or disable the external event API. |
@@ -235,6 +237,8 @@ The bridge only forwards messages from configured QQ targets:
 
 - Group messages: forwarded when the bot is at-mentioned or the message replies to a bot
   message.
+- Always-trigger group messages: for group ids in `qq.alwaysTriggerGroupIds`, every
+  non-bot message is forwarded, even without an @mention or reply.
 - Private messages: forwarded for every message from configured private users.
 - Other allowed conversation messages: optionally stored when `recordUntriggered` is true,
   but not forwarded to Astral.

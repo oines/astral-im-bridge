@@ -42,6 +42,9 @@ async function handleOneBotMessage(
 
   const sourceType = event.message_type;
   const targetId = sourceType === "group" ? String(event.group_id) : String(event.user_id);
+  if (sourceType === "group" && isBotSender(event, config.qq.botUserId)) {
+    return;
+  }
   if (!isAllowedTarget(config, sourceType, targetId)) {
     return;
   }
@@ -60,6 +63,8 @@ async function handleOneBotMessage(
       trigger = "group_mention";
     } else if (replyTo && await isReplyToBot(onebot, replyTo, config.qq.botUserId)) {
       trigger = "group_reply";
+    } else if (isAlwaysTriggerGroup(config, targetId)) {
+      trigger = "group_always";
     }
   } else {
     trigger = "private_message";
@@ -100,9 +105,22 @@ function isAllowedTarget(
   targetId: string,
 ): boolean {
   const list = sourceType === "group"
-    ? config.qq.allowedGroupIds
+    ? [...config.qq.allowedGroupIds, ...config.qq.alwaysTriggerGroupIds]
     : config.qq.allowedPrivateUserIds;
   return list.includes("*") || list.includes(targetId);
+}
+
+function isAlwaysTriggerGroup(
+  config: ReturnType<typeof loadConfig>,
+  targetId: string,
+): boolean {
+  return config.qq.alwaysTriggerGroupIds.includes("*")
+    || config.qq.alwaysTriggerGroupIds.includes(targetId);
+}
+
+function isBotSender(event: OneBotMessageEvent, botUserId: string): boolean {
+  const senderId = event.sender?.user_id ?? event.user_id;
+  return String(senderId ?? "") === botUserId;
 }
 
 async function isReplyToBot(
