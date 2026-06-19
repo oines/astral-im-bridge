@@ -20,6 +20,8 @@ with QQ, Tencent, NapCat, OneBot, or Astral Code.
 - Expose Streamable HTTP or stdio MCP tools for QQ replies, history, media, files,
   images, mentions, and replies to specific QQ message ids.
 - Accept generic external event webhooks and forward them into the fixed Astral session.
+- Expose a read-only Web UI for connection status, routing, recent messages,
+  recent conversations, and recent bridge logs.
 - Add a random 3-5 second delay before outbound QQ send actions.
 
 ## Requirements
@@ -123,6 +125,18 @@ Environment overrides:
 `recordUntriggered` controls whether non-triggering messages from allowed conversations
 are stored. Keeping it enabled lets the agent fetch surrounding context without forwarding
 every group message into Astral.
+
+## Web UI
+
+When HTTP MCP is enabled, open:
+
+```http
+GET /ui
+```
+
+The dashboard polls `GET /api/dashboard/state` and shows NapCat/Astral connection status,
+the active Astral turn id when one is running, configured routing, external event API
+status, recent conversations, recent stored messages, and recent bridge logs.
 
 ## Astral MCP Setup
 

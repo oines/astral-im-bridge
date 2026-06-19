@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
-import { WebSocketServer, type RawData, type WebSocket } from "ws";
+import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { error, log, warn } from "./logger.js";
 import type { GroupInfo, OneBotConfig, OneBotMessageEvent } from "./types.js";
 
@@ -129,6 +129,14 @@ export class OneBotClient extends EventEmitter<OneBotEvents> {
       message_id: Number.isNaN(Number(messageId)) ? messageId : Number(messageId),
     });
     return (response.data ?? null) as OneBotMessageEvent | null;
+  }
+
+  status(): Record<string, unknown> {
+    return {
+      connected: this.socket?.readyState === WebSocket.OPEN,
+      pendingActions: this.pending.size,
+      cachedGroups: this.groupInfoCache.size,
+    };
   }
 
   private replaceSocket(ws: WebSocket): void {

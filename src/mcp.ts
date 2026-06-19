@@ -6,6 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import type { AstralAppServerClient } from "./astral.js";
+import { dashboardHtml, dashboardState } from "./dashboard.js";
 import { error, log } from "./logger.js";
 import { ensureAttachmentDownloaded } from "./media.js";
 import type { OneBotClient } from "./onebot.js";
@@ -275,6 +276,20 @@ async function startHttpMcpServer(
     writeJson(res, 200, { ok: true });
   });
 
+  app.get("/", (_req: IncomingMessage, res: ServerResponse) => {
+    res.statusCode = 302;
+    res.setHeader("location", "/ui");
+    res.end();
+  });
+
+  app.get("/ui", (_req: IncomingMessage, res: ServerResponse) => {
+    writeHtml(res, 200, dashboardHtml());
+  });
+
+  app.get("/api/dashboard/state", (_req: IncomingMessage, res: ServerResponse) => {
+    writeJson(res, 200, dashboardState(config, onebot, astral, store));
+  });
+
   if (config.externalEvents.enabled) {
     app.get(`${config.externalEvents.path}/schema`, (_req: IncomingMessage, res: ServerResponse) => {
       writeJson(res, 200, externalEventApiSchema(config));
@@ -375,6 +390,8 @@ async function startHttpMcpServer(
     host: config.mcp.host,
     port: config.mcp.port,
     path: config.mcp.path,
+    uiPath: "/ui",
+    dashboardStatePath: "/api/dashboard/state",
     eventPath: config.externalEvents.enabled ? config.externalEvents.path : null,
   });
 }
@@ -452,6 +469,12 @@ function writeJson(res: ServerResponse, statusCode: number, body: unknown): void
   res.statusCode = statusCode;
   res.setHeader("content-type", "application/json");
   res.end(JSON.stringify(body));
+}
+
+function writeHtml(res: ServerResponse, statusCode: number, body: string): void {
+  res.statusCode = statusCode;
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.end(body);
 }
 
 function externalEventApiSchema(config: BridgeConfig): Record<string, unknown> {

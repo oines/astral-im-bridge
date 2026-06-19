@@ -36,6 +36,16 @@ export class AstralAppServerClient extends EventEmitter {
     return task;
   }
 
+  status(): Record<string, unknown> {
+    return {
+      connected: this.socket?.readyState === WebSocket.OPEN,
+      resumed: this.resumed,
+      activeTurnId: this.activeTurnId,
+      pendingRequests: this.pending.size,
+      threadId: this.config.threadId,
+    };
+  }
+
   private async submitInboundMessageNow(message: StoredMessage): Promise<void> {
     await this.ensureThread();
     const input = this.buildInput(buildAstralPrompt(message), message.attachments);

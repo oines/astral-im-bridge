@@ -261,6 +261,39 @@ export class MessageStore {
     };
   }
 
+  recentStoredMessages(limit: number): StoredMessage[] {
+    const boundedLimit = Math.min(Math.max(limit, 1), 100);
+    const rows = this.db
+      .prepare("SELECT * FROM messages ORDER BY time DESC, id DESC LIMIT ?")
+      .all(boundedLimit) as unknown as StoredMessageRow[];
+    return rows.map((row) => this.rowToMessage(row));
+  }
+
+  conversationSummaries(limit: number): Array<Record<string, unknown>> {
+    const boundedLimit = Math.min(Math.max(limit, 1), 100);
+    const rows = this.db
+      .prepare(
+        `SELECT latest.*, counts.message_count
+         FROM messages AS latest
+         INNER JOIN (
+           SELECT source_type, target_id, MAX(id) AS latest_id, COUNT(*) AS message_count
+           FROM messages
+           GROUP BY source_type, target_id
+         ) AS counts
+           ON counts.latest_id = latest.id
+         ORDER BY latest.time DESC, latest.id DESC
+         LIMIT ?`,
+      )
+      .all(boundedLimit) as unknown as Array<StoredMessageRow & { message_count: number }>;
+    return rows.map((row) => ({
+      sourceType: row.source_type,
+      targetId: row.target_id,
+      groupName: row.group_name,
+      messageCount: row.message_count,
+      latestMessage: this.rowToMessage(row),
+    }));
+  }
+
   mediaPath(filename: string): string {
     return path.join(this.config.mediaDir, filename);
   }
