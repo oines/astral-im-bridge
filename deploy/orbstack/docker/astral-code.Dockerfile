@@ -17,6 +17,7 @@ RUN apt-get update \
     pkg-config \
     protobuf-compiler \
     python3 \
+    zlib1g-dev \
   && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
