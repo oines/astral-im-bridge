@@ -3,6 +3,7 @@ import type { ExternalEventBatcher } from "./event_batcher.js";
 import { recentLogs } from "./logger.js";
 import type { OneBotClient } from "./onebot.js";
 import type { MessageStore } from "./store.js";
+import type { TelegramClient } from "./telegram.js";
 import type { BridgeConfig } from "./types.js";
 
 const startedAt = new Date();
@@ -10,6 +11,7 @@ const startedAt = new Date();
 export function dashboardState(
   config: BridgeConfig,
   onebot: OneBotClient,
+  telegram: TelegramClient | null,
   astral: AstralAppServerClient,
   store: MessageStore,
   eventBatcher?: ExternalEventBatcher,
@@ -20,6 +22,7 @@ export function dashboardState(
     uptimeSeconds: Math.floor(process.uptime()),
     services: {
       onebot: onebot.status(),
+      telegram: telegram?.status() ?? { enabled: false, polling: false },
       astral: astral.status(),
       mcp: {
         transport: config.mcp.transport,
@@ -45,7 +48,14 @@ export function dashboardState(
       allowedGroupIds: config.qq.allowedGroupIds,
       alwaysTriggerGroupIds: config.qq.alwaysTriggerGroupIds,
       allowedPrivateUserIds: config.qq.allowedPrivateUserIds,
+      triggerKeywords: config.qq.triggerKeywords,
       recordUntriggered: config.qq.recordUntriggered,
+      telegramEnabled: config.telegram.enabled,
+      telegramBotUsername: config.telegram.botUsername,
+      telegramAllowedChatIds: config.telegram.allowedChatIds,
+      telegramAlwaysTriggerChatIds: config.telegram.alwaysTriggerChatIds,
+      telegramTriggerKeywords: config.telegram.triggerKeywords,
+      telegramRecordUntriggered: config.telegram.recordUntriggered,
     },
     conversations: store.conversationSummaries(20),
     recentMessages: store.recentStoredMessages(30),
@@ -197,6 +207,7 @@ export function dashboardHtml(): string {
         <h2>Status</h2>
         <div class="grid" style="grid-template-columns: 1fr 1fr;">
           <div class="metric"><div class="label">NapCat</div><div id="napcat" class="value">-</div></div>
+          <div class="metric"><div class="label">Telegram</div><div id="telegram" class="value">-</div></div>
           <div class="metric"><div class="label">Astral</div><div id="astral" class="value">-</div></div>
           <div class="metric"><div class="label">Active turn</div><div id="turn" class="value">-</div></div>
           <div class="metric"><div class="label">Uptime</div><div id="uptime" class="value">-</div></div>
@@ -246,6 +257,7 @@ export function dashboardHtml(): string {
       const state = await res.json();
       qs('refresh').textContent = 'updated ' + time(state.now);
       qs('napcat').innerHTML = yes(state.services.onebot.connected);
+      qs('telegram').innerHTML = state.services.telegram.enabled ? yes(state.services.telegram.polling) : '<span class="muted">disabled</span>';
       qs('astral').innerHTML = yes(state.services.astral.connected);
       qs('turn').innerHTML = state.services.astral.activeTurnId ? '<span class="warn">' + esc(state.services.astral.activeTurnId) + '</span>' : '<span class="muted">idle</span>';
       qs('uptime').textContent = Math.floor(state.uptimeSeconds / 60) + 'm';
@@ -255,6 +267,9 @@ export function dashboardHtml(): string {
         ['groups', state.routing.allowedGroupIds.join(', ')],
         ['always trigger groups', state.routing.alwaysTriggerGroupIds.join(', ')],
         ['private', state.routing.allowedPrivateUserIds.join(', ')],
+        ['telegram bot', state.routing.telegramBotUsername || state.services.telegram.botUsername || ''],
+        ['telegram chats', state.routing.telegramAllowedChatIds.join(', ')],
+        ['telegram always trigger', state.routing.telegramAlwaysTriggerChatIds.join(', ')],
       ].map(([k,v]) => '<div class="row"><div class="label">' + esc(k) + '</div><div><code>' + esc(v) + '</code></div></div>').join('');
       qs('events').innerHTML = [
         ['enabled', state.services.externalEvents.enabled],
@@ -266,14 +281,14 @@ export function dashboardHtml(): string {
         ['batch window', state.services.externalEvents.debounceMs + 'ms'],
       ].map(([k,v]) => '<div class="row"><div class="label">' + esc(k) + '</div><div><code>' + esc(v) + '</code></div></div>').join('');
       qs('conversations').innerHTML = table(['type', 'target', 'count', 'latest'], state.conversations.map((c) => [
-        esc(c.sourceType),
+        esc((c.platform || 'qq') + ' / ' + c.sourceType),
         esc(c.groupName || c.targetId),
         esc(c.messageCount),
         esc(short(c.latestMessage.rawMessage || c.latestMessage.text))
       ]));
       qs('messages').innerHTML = table(['time', 'where', 'sender', 'trigger', 'text'], state.recentMessages.map((m) => [
         esc(time(m.time * 1000)),
-        esc((m.groupName || m.targetId) + ' / ' + m.sourceType),
+        esc((m.platform || 'qq') + ' / ' + (m.groupName || m.targetId) + ' / ' + m.sourceType),
         esc(m.groupCard || m.nickname || m.userId),
         esc(m.trigger),
         esc(short(m.rawMessage || m.text || '[non-text]'))

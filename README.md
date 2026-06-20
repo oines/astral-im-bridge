@@ -1,24 +1,27 @@
 # Astral Bridge
 
-Astral Bridge connects QQ, through NapCat's OneBot v11 reverse WebSocket, to one fixed
-Astral Code app-server session. It also exposes MCP tools so the agent can reply back to
-QQ, send files or images, and fetch recent conversation context when needed.
+Astral Bridge connects QQ, through NapCat's OneBot v11 reverse WebSocket, and optionally
+Telegram, through the Telegram Bot API, to one fixed Astral Code app-server session. It
+also exposes MCP tools so the agent can reply back to chat platforms, send files, mention
+people, recall/delete messages, and fetch recent conversation context when needed.
 
 This project is intended for self-hosted personal or team automation. It is not affiliated
-with QQ, Tencent, NapCat, OneBot, or Astral Code.
+with QQ, Tencent, NapCat, OneBot, Telegram, or Astral Code.
 
 ## Features
 
 - Receive QQ private and group messages from NapCat over OneBot v11.
+- Receive Telegram private, group, supergroup, and channel-post messages through long polling.
 - Route every accepted message into one configured Astral app-server thread.
-- Trigger group messages only when the bot is mentioned or replied to.
-- Trigger every message from configured private QQ users.
+- Trigger group messages only when the bot is mentioned, replied to, or the chat is configured
+  as always-trigger.
+- Trigger every message from configured private QQ or Telegram users/chats.
 - Store allowed conversation history locally in SQLite for later MCP lookups.
-- Include compact inbound context: group name/id, sender QQ, nickname, group card,
-  sender role, message id, trigger kind, unread count, and attachment metadata.
+- Include compact inbound context: platform, chat/group name/id, sender id, nickname,
+  username/card, message id, reply id, trigger kind, unread count, and attachment metadata.
 - Support app-server `turn/steer` when the fixed Astral thread already has an active turn.
-- Expose Streamable HTTP or stdio MCP tools for QQ replies, history, media, files,
-  images, mentions, and replies to specific QQ message ids.
+- Expose Streamable HTTP or stdio MCP tools for QQ and Telegram replies, history, media,
+  files, mentions, and replies to specific message ids.
 - Accept generic external event webhooks and forward them into the fixed Astral session.
 - Expose a read-only Web UI for connection status, routing, recent messages,
   recent conversations, and recent bridge logs.
@@ -30,6 +33,7 @@ with QQ, Tencent, NapCat, OneBot, or Astral Code.
 - pnpm 10 or newer.
 - A running Astral Code app-server.
 - NapCat configured with OneBot v11 reverse WebSocket.
+- Optional: a Telegram bot token from BotFather if Telegram support is enabled.
 
 ## Quick Start
 
@@ -91,7 +95,20 @@ Start from `examples/config.example.json`:
     "allowedGroupIds": ["REPLACE_GROUP_ID"],
     "alwaysTriggerGroupIds": [],
     "allowedPrivateUserIds": ["REPLACE_USER_ID"],
+    "triggerKeywords": ["astral", "bot"],
     "recordUntriggered": true
+  },
+  "telegram": {
+    "enabled": false,
+    "botToken": "REPLACE_WITH_TELEGRAM_BOT_TOKEN",
+    "botUsername": "REPLACE_WITH_TELEGRAM_BOT_USERNAME",
+    "allowedChatIds": ["REPLACE_TELEGRAM_CHAT_ID"],
+    "alwaysTriggerChatIds": [],
+    "triggerKeywords": ["astral", "bot"],
+    "recordUntriggered": true,
+    "pollTimeoutSeconds": 25,
+    "pollIntervalMs": 1000,
+    "apiBaseUrl": "https://api.telegram.org"
   },
   "externalEvents": {
     "enabled": true,
@@ -122,6 +139,16 @@ Environment overrides:
 | `ASTRAL_BRIDGE_ALLOWED_GROUP_IDS` | Comma-separated allowed group ids. |
 | `ASTRAL_BRIDGE_ALWAYS_TRIGGER_GROUP_IDS` | Comma-separated group ids where every non-bot message is forwarded to Astral. |
 | `ASTRAL_BRIDGE_ALLOWED_PRIVATE_USER_IDS` | Comma-separated allowed private user ids. |
+| `ASTRAL_BRIDGE_TRIGGER_KEYWORDS` | Comma-separated QQ trigger keywords. Any allowed group/private message containing one keyword, case-insensitively, is forwarded to Astral. |
+| `ASTRAL_BRIDGE_TELEGRAM_ENABLED` | Enable Telegram long polling. |
+| `ASTRAL_BRIDGE_TELEGRAM_BOT_TOKEN` | Telegram bot token from BotFather. |
+| `ASTRAL_BRIDGE_TELEGRAM_BOT_USERNAME` | Optional bot username, without or with `@`; `getMe` also discovers it at runtime. |
+| `ASTRAL_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS` | Comma-separated Telegram `chat.id` allowlist. Use `/chatid` in a chat to retrieve it. |
+| `ASTRAL_BRIDGE_TELEGRAM_ALWAYS_TRIGGER_CHAT_IDS` | Comma-separated Telegram chat ids where every non-bot message is forwarded to Astral. |
+| `ASTRAL_BRIDGE_TELEGRAM_TRIGGER_KEYWORDS` | Comma-separated Telegram trigger keywords. Any allowed chat message containing one keyword, case-insensitively, is forwarded to Astral. |
+| `ASTRAL_BRIDGE_TELEGRAM_RECORD_UNTRIGGERED` | Store non-triggering Telegram messages from allowed chats. |
+| `ASTRAL_BRIDGE_TELEGRAM_POLL_TIMEOUT_SECONDS` | Telegram `getUpdates` long-poll timeout. |
+| `ASTRAL_BRIDGE_TELEGRAM_POLL_INTERVAL_MS` | Delay after a failed Telegram poll before retrying. |
 | `ASTRAL_BRIDGE_MCP_TRANSPORT` | `stdio` or `http`. |
 | `ASTRAL_BRIDGE_EVENT_API_ENABLED` | Enable or disable the external event API. |
 | `ASTRAL_BRIDGE_EVENT_API_PATH` | External event API path, default `/api/events`. |
@@ -133,6 +160,12 @@ Environment overrides:
 `recordUntriggered` controls whether non-triggering messages from allowed conversations
 are stored. Keeping it enabled lets the agent fetch surrounding context without forwarding
 every group message into Astral.
+
+Telegram uses long polling. On startup the bridge calls `deleteWebhook` so Telegram will
+allow `getUpdates`. Send `/chatid` to the bot in a private chat, group, supergroup, or
+topic to get the exact `chat_id`; this command works even before the chat is allowlisted.
+All other Telegram interaction requires the chat id to be present in
+`telegram.allowedChatIds` or `telegram.alwaysTriggerChatIds`.
 
 ## Web UI
 
@@ -152,6 +185,10 @@ For stdio MCP, build first and point Astral at the compiled entrypoint:
 
 ```toml
 [mcp_servers.qq]
+command = "node"
+args = ["/path/to/astral-bridge/dist/index.js", "--config", "/path/to/astral-bridge/config.json"]
+
+[mcp_servers.telegram]
 command = "node"
 args = ["/path/to/astral-bridge/dist/index.js", "--config", "/path/to/astral-bridge/config.json"]
 ```
@@ -177,11 +214,18 @@ Then configure Astral:
 ```toml
 [mcp_servers.qq]
 url = "http://bridge:6710/mcp"
+
+[mcp_servers.telegram]
+url = "http://bridge:6710/mcp"
 ```
+
+The bridge exposes both QQ and Telegram tools from the same MCP endpoint. Registering the
+endpoint under both `qq` and `telegram` gives the agent natural tool names such as
+`mcp__qq__qq_send_group_message` and `mcp__telegram__telegram_send_message`.
 
 ## MCP Tools
 
-| Tool | Purpose |
+| QQ Tool | Purpose |
 | --- | --- |
 | `qq_send_group_message` | Send a group message with text, images, ordered parts, mentions, or a reply target. |
 | `qq_send_private_message` | Send a private message with text, images, ordered parts, or a reply target. |
@@ -201,6 +245,18 @@ url = "http://bridge:6710/mcp"
 | `qq_group_notice_admin` | Send, list, or delete group notices. |
 | `qq_group_file_admin` | Manage group files and folders. |
 | `qq_group_info_admin` | Read group, member, and honor information. |
+
+| Telegram Tool | Purpose |
+| --- | --- |
+| `telegram_send_message` | Send text with ordered text/mention parts, optional reply target, and optional topic thread id. |
+| `telegram_send_file` | Send a local path, Telegram `file_id`, or HTTP URL as a document/file. Images intentionally use this tool too. |
+| `telegram_delete_message` | Delete/recall a message when Telegram permissions allow it. Requires `confirm:true`. |
+| `telegram_get_unread_messages` | Return the unread batch counted by the latest inbound Astral prompt. |
+| `telegram_get_recent_messages` | Return recent stored messages for one Telegram chat. |
+| `telegram_get_message` | Return one stored Telegram message by `message_id`. |
+| `telegram_search_messages` | Search stored Telegram text messages in one chat. |
+| `telegram_get_conversation_state` | Return bridge state and counts for one Telegram chat. |
+| `telegram_download_media` | Download a stored Telegram attachment into the local media cache. |
 
 ### Group Administration
 
@@ -231,22 +287,56 @@ Reply to a specific QQ message by passing `reply_to_message_id` with the OneBot
 Images in outbound messages use OneBot `image` segments. Non-image files use
 NapCat-compatible `upload_group_file` and `upload_private_file` actions.
 
+Telegram text messages use ordered `parts` for mentions:
+
+```json
+[
+  { "type": "text", "text": "请 " },
+  { "type": "mention", "username": "alice" },
+  { "type": "text", "text": " 看一下；也同步给 " },
+  { "type": "mention", "user_id": "123456789", "text": "Bob" }
+]
+```
+
+For Telegram files, call `telegram_send_file` for images and non-images alike. This sends
+through Telegram `sendDocument`, preserving the original file quality:
+
+```json
+{
+  "chat_id": "-1001234567890",
+  "file": "/workspace/result.png",
+  "caption": "结果图",
+  "reply_to_message_id": "123",
+  "message_thread_id": "456"
+}
+```
+
 ## Message Routing
 
-The bridge only forwards messages from configured QQ targets:
+The bridge only forwards messages from configured QQ targets or Telegram chat ids:
 
 - Group messages: forwarded when the bot is at-mentioned or the message replies to a bot
   message.
+- Keyword messages: in any allowed QQ/Telegram group or private chat, messages containing
+  any configured trigger keyword are forwarded. Keyword matching is case-insensitive.
 - Always-trigger group messages: for group ids in `qq.alwaysTriggerGroupIds`, every
   non-bot message is forwarded, even without an @mention or reply.
 - Private messages: forwarded for every message from configured private users.
 - Other allowed conversation messages: optionally stored when `recordUntriggered` is true,
   but not forwarded to Astral.
+- Telegram `/chatid`: always answered directly so you can discover the current Telegram
+  `chat.id` before editing the allowlist.
+- Telegram group/supergroup/channel messages: forwarded when the bot is mentioned, the
+  message replies to a bot message, or the chat id is in `telegram.alwaysTriggerChatIds`.
+- Telegram private messages: forwarded for every message from configured private chat ids.
+- `/stop`: in any allowed QQ/Telegram group or private chat, interrupts the active Astral
+  turn and replies in the same conversation.
 
 Every forwarded turn includes a `conversation_unread` section. `unread_count` is the
 number of stored messages in the same group/private conversation since the previous Astral
 prompt, including the current trigger message. The agent can call `qq_get_unread_messages`
-when that context is useful; it does not need to call it for every message.
+or `telegram_get_unread_messages` when that context is useful; it does not need to call it
+for every message.
 
 ## External Event API
 

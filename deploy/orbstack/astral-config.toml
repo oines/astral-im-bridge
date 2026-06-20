@@ -5,3 +5,6 @@ sandbox_mode = "danger-full-access"
 
 [mcp_servers.qq]
 url = "http://bridge:6710/mcp"
+
+[mcp_servers.telegram]
+url = "http://bridge:6710/mcp"

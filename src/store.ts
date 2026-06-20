@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
   ConversationUnread,
+  Platform,
   SourceType,
   StoredAttachment,
   StoredMessage,
@@ -25,12 +26,12 @@ export class MessageStore {
   saveMessage(message: StoredMessage): number {
     const insert = this.db.prepare(`
       INSERT INTO messages (
-        platform_message_id, source_type, target_id, group_id, group_name,
+        platform, platform_message_id, source_type, target_id, group_id, group_name,
         user_id, nickname, group_card, role, time, text, raw_message,
         trigger, reply_to_message_id, raw_event_json
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(source_type, target_id, platform_message_id) DO UPDATE SET
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(platform, source_type, target_id, platform_message_id) DO UPDATE SET
         group_name = excluded.group_name,
         nickname = excluded.nickname,
         group_card = excluded.group_card,
@@ -42,6 +43,7 @@ export class MessageStore {
         raw_event_json = excluded.raw_event_json
     `);
     insert.run(
+      message.platform,
       message.platformMessageId,
       message.sourceType,
       message.targetId,
@@ -61,9 +63,9 @@ export class MessageStore {
 
     const row = this.db
       .prepare(
-        "SELECT id FROM messages WHERE source_type = ? AND target_id = ? AND platform_message_id = ?",
+        "SELECT id FROM messages WHERE platform = ? AND source_type = ? AND target_id = ? AND platform_message_id = ?",
       )
-      .get(message.sourceType, message.targetId, message.platformMessageId) as { id: number };
+      .get(message.platform, message.sourceType, message.targetId, message.platformMessageId) as { id: number };
 
     this.db.prepare("DELETE FROM attachments WHERE message_row_id = ?").run(row.id);
     const attachmentInsert = this.db.prepare(`
@@ -89,6 +91,7 @@ export class MessageStore {
   }
 
   recentMessages(
+    platform: Platform,
     sourceType: SourceType,
     targetId: string,
     limit: number,
@@ -99,59 +102,74 @@ export class MessageStore {
     if (beforeMessageId) {
       const anchor = this.db
         .prepare(
-          "SELECT time, id FROM messages WHERE source_type = ? AND target_id = ? AND platform_message_id = ?",
+          "SELECT time, id FROM messages WHERE platform = ? AND source_type = ? AND target_id = ? AND platform_message_id = ?",
         )
-        .get(sourceType, targetId, beforeMessageId) as { time: number; id: number } | undefined;
+        .get(platform, sourceType, targetId, beforeMessageId) as { time: number; id: number } | undefined;
       if (!anchor) {
         return [];
       }
       rows = this.db
         .prepare(
           `SELECT * FROM messages
-           WHERE source_type = ? AND target_id = ?
+           WHERE platform = ? AND source_type = ? AND target_id = ?
              AND (time < ? OR (time = ? AND id < ?))
            ORDER BY time DESC, id DESC
            LIMIT ?`,
         )
-        .all(sourceType, targetId, anchor.time, anchor.time, anchor.id, boundedLimit) as unknown as StoredMessageRow[];
+        .all(platform, sourceType, targetId, anchor.time, anchor.time, anchor.id, boundedLimit) as unknown as StoredMessageRow[];
     } else {
       rows = this.db
         .prepare(
           `SELECT * FROM messages
-           WHERE source_type = ? AND target_id = ?
+           WHERE platform = ? AND source_type = ? AND target_id = ?
            ORDER BY time DESC, id DESC
            LIMIT ?`,
         )
-        .all(sourceType, targetId, boundedLimit) as unknown as StoredMessageRow[];
+        .all(platform, sourceType, targetId, boundedLimit) as unknown as StoredMessageRow[];
     }
     return rows.reverse().map((row) => this.rowToMessage(row));
   }
 
-  getMessage(messageId: string, sourceType?: SourceType, targetId?: string): StoredMessage | null {
-    const row = sourceType && targetId
+  getMessage(
+    messageId: string,
+    platform?: Platform,
+    sourceType?: SourceType,
+    targetId?: string,
+  ): StoredMessage | null {
+    const row = platform && sourceType && targetId
       ? (this.db
           .prepare(
-            "SELECT * FROM messages WHERE source_type = ? AND target_id = ? AND platform_message_id = ?",
+            "SELECT * FROM messages WHERE platform = ? AND source_type = ? AND target_id = ? AND platform_message_id = ?",
           )
-          .get(sourceType, targetId, messageId) as StoredMessageRow | undefined)
+          .get(platform, sourceType, targetId, messageId) as StoredMessageRow | undefined)
       : (this.db
-          .prepare("SELECT * FROM messages WHERE platform_message_id = ? ORDER BY time DESC, id DESC LIMIT 1")
-          .get(messageId) as StoredMessageRow | undefined);
+          .prepare(
+            platform
+              ? "SELECT * FROM messages WHERE platform = ? AND platform_message_id = ? ORDER BY time DESC, id DESC LIMIT 1"
+              : "SELECT * FROM messages WHERE platform_message_id = ? ORDER BY time DESC, id DESC LIMIT 1",
+          )
+          .get(...(platform ? [platform, messageId] : [messageId])) as StoredMessageRow | undefined);
     return row ? this.rowToMessage(row) : null;
   }
 
-  searchMessages(sourceType: SourceType, targetId: string, query: string, limit: number): StoredMessage[] {
+  searchMessages(
+    platform: Platform,
+    sourceType: SourceType,
+    targetId: string,
+    query: string,
+    limit: number,
+  ): StoredMessage[] {
     const boundedLimit = Math.min(Math.max(limit, 1), 100);
     const like = `%${query.replaceAll("%", "\\%").replaceAll("_", "\\_")}%`;
     const rows = this.db
       .prepare(
         `SELECT * FROM messages
-         WHERE source_type = ? AND target_id = ?
+         WHERE platform = ? AND source_type = ? AND target_id = ?
            AND (text LIKE ? ESCAPE '\\' OR raw_message LIKE ? ESCAPE '\\')
          ORDER BY time DESC, id DESC
          LIMIT ?`,
       )
-      .all(sourceType, targetId, like, like, boundedLimit) as unknown as StoredMessageRow[];
+      .all(platform, sourceType, targetId, like, like, boundedLimit) as unknown as StoredMessageRow[];
     return rows.reverse().map((row) => this.rowToMessage(row));
   }
 
@@ -160,8 +178,8 @@ export class MessageStore {
     return row ? attachmentFromRow(row) : null;
   }
 
-  getAttachmentsForMessage(messageId: string): StoredAttachment[] {
-    const message = this.getMessage(messageId);
+  getAttachmentsForMessage(messageId: string, platform?: Platform): StoredAttachment[] {
+    const message = this.getMessage(messageId, platform);
     return message?.attachments ?? [];
   }
 
@@ -170,34 +188,36 @@ export class MessageStore {
   }
 
   claimUnreadForPrompt(
+    platform: Platform,
     sourceType: SourceType,
     targetId: string,
     currentMessageRowId: number,
   ): ConversationUnread {
-    const cursor = this.conversationCursor(sourceType, targetId);
+    const cursor = this.conversationCursor(platform, sourceType, targetId);
     const previousRowId = cursor?.last_seen_message_row_id ?? 0;
     const stats = this.db
       .prepare(
         `SELECT COUNT(*) AS count, MIN(id) AS first_id, MAX(id) AS latest_id
          FROM messages
-         WHERE source_type = ? AND target_id = ? AND id > ? AND id <= ?`,
+         WHERE platform = ? AND source_type = ? AND target_id = ? AND id > ? AND id <= ?`,
       )
-      .get(sourceType, targetId, previousRowId, currentMessageRowId) as unknown as UnreadStatsRow;
+      .get(platform, sourceType, targetId, previousRowId, currentMessageRowId) as unknown as UnreadStatsRow;
 
-    this.markConversationPrompted(sourceType, targetId, currentMessageRowId, stats);
+    this.markConversationPrompted(platform, sourceType, targetId, currentMessageRowId, stats);
 
     return {
       unreadCount: stats.count,
     };
   }
 
-  unreadMessages(sourceType: SourceType, targetId: string, limit: number): Record<string, unknown> {
-    const cursor = this.conversationCursor(sourceType, targetId);
+  unreadMessages(platform: Platform, sourceType: SourceType, targetId: string, limit: number): Record<string, unknown> {
+    const cursor = this.conversationCursor(platform, sourceType, targetId);
     const unreadCount = cursor?.last_prompt_unread_count ?? 0;
     const firstRowId = cursor?.last_prompt_first_message_row_id ?? null;
     const latestRowId = cursor?.last_prompt_latest_message_row_id ?? null;
     if (!cursor || unreadCount <= 0 || firstRowId == null || latestRowId == null) {
       return {
+        platform,
         target_type: sourceType,
         target_id: targetId,
         unread_count: 0,
@@ -212,17 +232,18 @@ export class MessageStore {
       .prepare(
         `SELECT * FROM (
            SELECT * FROM messages
-           WHERE source_type = ? AND target_id = ?
+           WHERE platform = ? AND source_type = ? AND target_id = ?
              AND id >= ? AND id <= ?
            ORDER BY id DESC
            LIMIT ?
          )
          ORDER BY id ASC`,
       )
-      .all(sourceType, targetId, firstRowId, latestRowId, boundedLimit) as unknown as StoredMessageRow[];
+      .all(platform, sourceType, targetId, firstRowId, latestRowId, boundedLimit) as unknown as StoredMessageRow[];
     const messages = rows.map((row) => this.rowToMessage(row));
 
     return {
+      platform,
       target_type: sourceType,
       target_id: targetId,
       unread_count: unreadCount,
@@ -232,25 +253,26 @@ export class MessageStore {
     };
   }
 
-  conversationState(sourceType: SourceType, targetId: string): Record<string, unknown> {
+  conversationState(platform: Platform, sourceType: SourceType, targetId: string): Record<string, unknown> {
     const count = this.db
-      .prepare("SELECT COUNT(*) AS count FROM messages WHERE source_type = ? AND target_id = ?")
-      .get(sourceType, targetId) as { count: number };
+      .prepare("SELECT COUNT(*) AS count FROM messages WHERE platform = ? AND source_type = ? AND target_id = ?")
+      .get(platform, sourceType, targetId) as { count: number };
     const last = this.db
       .prepare(
-        "SELECT * FROM messages WHERE source_type = ? AND target_id = ? ORDER BY time DESC, id DESC LIMIT 1",
+        "SELECT * FROM messages WHERE platform = ? AND source_type = ? AND target_id = ? ORDER BY time DESC, id DESC LIMIT 1",
       )
-      .get(sourceType, targetId) as StoredMessageRow | undefined;
-    const cursor = this.conversationCursor(sourceType, targetId);
+      .get(platform, sourceType, targetId) as StoredMessageRow | undefined;
+    const cursor = this.conversationCursor(platform, sourceType, targetId);
     const lastSeenRowId = cursor?.last_seen_message_row_id ?? 0;
     const unread = this.db
       .prepare(
         `SELECT COUNT(*) AS count
          FROM messages
-         WHERE source_type = ? AND target_id = ? AND id > ?`,
+         WHERE platform = ? AND source_type = ? AND target_id = ? AND id > ?`,
       )
-      .get(sourceType, targetId, lastSeenRowId) as { count: number };
+      .get(platform, sourceType, targetId, lastSeenRowId) as { count: number };
     return {
+      platform,
       source_type: sourceType,
       target_id: targetId,
       stored_message_count: count.count,
@@ -276,9 +298,9 @@ export class MessageStore {
         `SELECT latest.*, counts.message_count
          FROM messages AS latest
          INNER JOIN (
-           SELECT source_type, target_id, MAX(id) AS latest_id, COUNT(*) AS message_count
+           SELECT platform, source_type, target_id, MAX(id) AS latest_id, COUNT(*) AS message_count
            FROM messages
-           GROUP BY source_type, target_id
+           GROUP BY platform, source_type, target_id
          ) AS counts
            ON counts.latest_id = latest.id
          ORDER BY latest.time DESC, latest.id DESC
@@ -286,6 +308,7 @@ export class MessageStore {
       )
       .all(boundedLimit) as unknown as Array<StoredMessageRow & { message_count: number }>;
     return rows.map((row) => ({
+      platform: row.platform,
       sourceType: row.source_type,
       targetId: row.target_id,
       groupName: row.group_name,
@@ -304,6 +327,7 @@ export class MessageStore {
       .all(row.id) as unknown as AttachmentRow[];
     return {
       id: row.id,
+      platform: row.platform,
       platformMessageId: row.platform_message_id,
       sourceType: row.source_type,
       targetId: row.target_id,
@@ -323,10 +347,10 @@ export class MessageStore {
     };
   }
 
-  private conversationCursor(sourceType: SourceType, targetId: string): ConversationCursorRow | null {
+  private conversationCursor(platform: Platform, sourceType: SourceType, targetId: string): ConversationCursorRow | null {
     const row = this.db
-      .prepare("SELECT * FROM conversation_cursors WHERE source_type = ? AND target_id = ?")
-      .get(sourceType, targetId) as ConversationCursorRow | undefined;
+      .prepare("SELECT * FROM conversation_cursors WHERE platform = ? AND source_type = ? AND target_id = ?")
+      .get(platform, sourceType, targetId) as ConversationCursorRow | undefined;
     return row ?? null;
   }
 
@@ -338,6 +362,7 @@ export class MessageStore {
   }
 
   private markConversationPrompted(
+    platform: Platform,
     sourceType: SourceType,
     targetId: string,
     messageRowId: number,
@@ -350,12 +375,12 @@ export class MessageStore {
     this.db
       .prepare(
         `INSERT INTO conversation_cursors (
-           source_type, target_id, last_seen_message_row_id, last_seen_platform_message_id,
+           platform, source_type, target_id, last_seen_message_row_id, last_seen_platform_message_id,
            last_prompt_first_message_row_id, last_prompt_latest_message_row_id, last_prompt_unread_count,
            updated_at
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(source_type, target_id) DO UPDATE SET
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(platform, source_type, target_id) DO UPDATE SET
            last_seen_message_row_id = excluded.last_seen_message_row_id,
            last_seen_platform_message_id = excluded.last_seen_platform_message_id,
            last_prompt_first_message_row_id = excluded.last_prompt_first_message_row_id,
@@ -365,6 +390,7 @@ export class MessageStore {
          WHERE excluded.last_seen_message_row_id > conversation_cursors.last_seen_message_row_id`,
       )
       .run(
+        platform,
         sourceType,
         targetId,
         messageRowId,
@@ -377,9 +403,44 @@ export class MessageStore {
   }
 
   private migrate(): void {
+    this.rebuildLegacyPlatformTables();
+    this.createMessageTables();
+    this.ensureConversationCursorColumns();
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_messages_conversation_time
+        ON messages(platform, source_type, target_id, time, id);
+
+      CREATE INDEX IF NOT EXISTS idx_attachments_message
+        ON attachments(message_row_id);
+    `);
+
+    this.db.exec(`
+      INSERT OR IGNORE INTO conversation_cursors (
+        platform, source_type, target_id, last_seen_message_row_id, last_seen_platform_message_id,
+        last_prompt_first_message_row_id, last_prompt_latest_message_row_id, last_prompt_unread_count,
+        updated_at
+      )
+      SELECT latest.platform, latest.source_type, latest.target_id, latest.id, latest.platform_message_id,
+        NULL, NULL, 0, unixepoch()
+      FROM messages AS latest
+      INNER JOIN (
+        SELECT platform, source_type, target_id, MAX(id) AS id
+        FROM messages
+        GROUP BY platform, source_type, target_id
+      ) AS newest
+        ON newest.platform = latest.platform
+       AND newest.source_type = latest.source_type
+       AND newest.target_id = latest.target_id
+       AND newest.id = latest.id;
+    `);
+  }
+
+  private createMessageTables(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        platform TEXT NOT NULL DEFAULT 'qq',
         platform_message_id TEXT NOT NULL,
         source_type TEXT NOT NULL,
         target_id TEXT NOT NULL,
@@ -395,11 +456,8 @@ export class MessageStore {
         trigger TEXT NOT NULL,
         reply_to_message_id TEXT,
         raw_event_json TEXT NOT NULL,
-        UNIQUE(source_type, target_id, platform_message_id)
+        UNIQUE(platform, source_type, target_id, platform_message_id)
       );
-
-      CREATE INDEX IF NOT EXISTS idx_messages_conversation_time
-        ON messages(source_type, target_id, time, id);
 
       CREATE TABLE IF NOT EXISTS attachments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -414,10 +472,8 @@ export class MessageStore {
         raw_json TEXT NOT NULL
       );
 
-      CREATE INDEX IF NOT EXISTS idx_attachments_message
-        ON attachments(message_row_id);
-
       CREATE TABLE IF NOT EXISTS conversation_cursors (
+        platform TEXT NOT NULL DEFAULT 'qq',
         source_type TEXT NOT NULL,
         target_id TEXT NOT NULL,
         last_seen_message_row_id INTEGER NOT NULL,
@@ -426,50 +482,101 @@ export class MessageStore {
         last_prompt_latest_message_row_id INTEGER,
         last_prompt_unread_count INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL,
-        PRIMARY KEY(source_type, target_id)
+        PRIMARY KEY(platform, source_type, target_id)
       );
-    `);
-
-    this.ensureConversationCursorColumns();
-
-    this.db.exec(`
-      INSERT OR IGNORE INTO conversation_cursors (
-        source_type, target_id, last_seen_message_row_id, last_seen_platform_message_id,
-        last_prompt_first_message_row_id, last_prompt_latest_message_row_id, last_prompt_unread_count,
-        updated_at
-      )
-      SELECT latest.source_type, latest.target_id, latest.id, latest.platform_message_id,
-        NULL, NULL, 0, unixepoch()
-      FROM messages AS latest
-      INNER JOIN (
-        SELECT source_type, target_id, MAX(id) AS id
-        FROM messages
-        GROUP BY source_type, target_id
-      ) AS newest
-        ON newest.source_type = latest.source_type
-       AND newest.target_id = latest.target_id
-       AND newest.id = latest.id;
     `);
   }
 
+  private rebuildLegacyPlatformTables(): void {
+    const messageColumns = this.tableColumns("messages");
+    if (messageColumns.size > 0 && !messageColumns.has("platform")) {
+      const hasAttachments = this.tableColumns("attachments").size > 0;
+      this.db.exec("PRAGMA foreign_keys = OFF");
+      try {
+        this.db.exec("ALTER TABLE messages RENAME TO messages_legacy_platform");
+        if (hasAttachments) {
+          this.db.exec("ALTER TABLE attachments RENAME TO attachments_legacy_platform");
+        }
+        this.createMessageTables();
+        this.db.exec(`
+          INSERT INTO messages (
+            id, platform, platform_message_id, source_type, target_id, group_id, group_name,
+            user_id, nickname, group_card, role, time, text, raw_message,
+            trigger, reply_to_message_id, raw_event_json
+          )
+          SELECT
+            id, 'qq', platform_message_id, source_type, target_id, group_id, group_name,
+            user_id, nickname, group_card, role, time, text, raw_message,
+            trigger, reply_to_message_id, raw_event_json
+          FROM messages_legacy_platform;
+        `);
+        if (hasAttachments) {
+          this.db.exec(`
+            INSERT INTO attachments (
+              id, message_row_id, kind, file_id, name, url, path, mime_type, size, raw_json
+            )
+            SELECT id, message_row_id, kind, file_id, name, url, path, mime_type, size, raw_json
+            FROM attachments_legacy_platform;
+          `);
+          this.db.exec("DROP TABLE attachments_legacy_platform");
+        }
+        this.db.exec("DROP TABLE messages_legacy_platform");
+      } finally {
+        this.db.exec("PRAGMA foreign_keys = ON");
+      }
+    }
+
+    const cursorColumns = this.tableColumns("conversation_cursors");
+    if (cursorColumns.size > 0 && !cursorColumns.has("platform")) {
+      this.db.exec("ALTER TABLE conversation_cursors RENAME TO conversation_cursors_legacy_platform");
+      this.createMessageTables();
+      this.ensureConversationCursorColumnsFor("conversation_cursors_legacy_platform");
+      this.db.exec(`
+        INSERT INTO conversation_cursors (
+          platform, source_type, target_id, last_seen_message_row_id, last_seen_platform_message_id,
+          last_prompt_first_message_row_id, last_prompt_latest_message_row_id, last_prompt_unread_count,
+          updated_at
+        )
+        SELECT
+          'qq', source_type, target_id, last_seen_message_row_id, last_seen_platform_message_id,
+          last_prompt_first_message_row_id, last_prompt_latest_message_row_id, last_prompt_unread_count,
+          updated_at
+        FROM conversation_cursors_legacy_platform;
+      `);
+      this.db.exec("DROP TABLE conversation_cursors_legacy_platform");
+    }
+  }
+
   private ensureConversationCursorColumns(): void {
+    this.ensureConversationCursorColumnsFor("conversation_cursors");
+  }
+
+  private ensureConversationCursorColumnsFor(tableName: string): void {
     const rows = this.db
-      .prepare("PRAGMA table_info(conversation_cursors)")
+      .prepare(`PRAGMA table_info(${tableName})`)
       .all() as unknown as Array<{ name: string }>;
     const columns = new Set(rows.map((row) => row.name));
     if (!columns.has("last_prompt_first_message_row_id")) {
-      this.db.exec("ALTER TABLE conversation_cursors ADD COLUMN last_prompt_first_message_row_id INTEGER");
+      this.db.exec(`ALTER TABLE ${tableName} ADD COLUMN last_prompt_first_message_row_id INTEGER`);
     }
     if (!columns.has("last_prompt_latest_message_row_id")) {
-      this.db.exec("ALTER TABLE conversation_cursors ADD COLUMN last_prompt_latest_message_row_id INTEGER");
+      this.db.exec(`ALTER TABLE ${tableName} ADD COLUMN last_prompt_latest_message_row_id INTEGER`);
     }
     if (!columns.has("last_prompt_unread_count")) {
-      this.db.exec("ALTER TABLE conversation_cursors ADD COLUMN last_prompt_unread_count INTEGER NOT NULL DEFAULT 0");
+      this.db.exec(`ALTER TABLE ${tableName} ADD COLUMN last_prompt_unread_count INTEGER NOT NULL DEFAULT 0`);
     }
+  }
+
+  private tableColumns(tableName: string): Set<string> {
+    const rows = this.db
+      .prepare(`PRAGMA table_info(${tableName})`)
+      .all() as unknown as Array<{ name: string }>;
+    return new Set(rows.map((row) => row.name));
   }
 }
 
 interface ConversationCursorRow {
+  platform: Platform;
   source_type: SourceType;
   target_id: string;
   last_seen_message_row_id: number;

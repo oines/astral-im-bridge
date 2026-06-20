@@ -14,6 +14,11 @@ import { ensureAttachmentDownloaded } from "./media.js";
 import { buildOutboundStoredMessage, replySegmentMessageId } from "./message.js";
 import type { OneBotClient } from "./onebot.js";
 import type { MessageStore } from "./store.js";
+import {
+  buildTelegramOutboundMessage,
+  TelegramClient,
+  type TelegramMessage,
+} from "./telegram.js";
 import type { BridgeConfig, ExternalEvent, MessageSegment, SourceType } from "./types.js";
 
 const QQ_SEND_DELAY_MIN_MS = 3000;
@@ -27,6 +32,15 @@ const outboundPartSchema = z.object({
 });
 
 type OutboundPart = z.infer<typeof outboundPartSchema>;
+
+const telegramOutboundPartSchema = z.object({
+  type: z.enum(["text", "mention"]),
+  text: z.string().optional(),
+  username: z.string().optional(),
+  user_id: z.string().optional(),
+});
+
+type TelegramOutboundPart = z.infer<typeof telegramOutboundPartSchema>;
 
 const externalEventSchema = z.object({
   id: z.string().trim().min(1).max(200).optional(),
@@ -61,18 +75,24 @@ interface SaveOutboundMessageOptions {
   segments: MessageSegment[];
 }
 
+interface TelegramOutboundTextOptions {
+  message: string;
+  parts?: TelegramOutboundPart[];
+}
+
 export async function startMcpServer(
   config: BridgeConfig,
   onebot: OneBotClient,
+  telegram: TelegramClient | null,
   store: MessageStore,
   astral: AstralAppServerClient,
 ): Promise<void> {
   if (config.mcp.transport === "http") {
-    await startHttpMcpServer(config, onebot, store, astral);
+    await startHttpMcpServer(config, onebot, telegram, store, astral);
     return;
   }
 
-  const server = createBridgeMcpServer(config, onebot, store);
+  const server = createBridgeMcpServer(config, onebot, telegram, store);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
@@ -80,10 +100,11 @@ export async function startMcpServer(
 function createBridgeMcpServer(
   config: BridgeConfig,
   onebot: OneBotClient,
+  telegram: TelegramClient | null,
   store: MessageStore,
 ): McpServer {
   const server = new McpServer({
-    name: "astral-bridge-qq",
+    name: "astral-bridge-im",
     version: "0.1.0",
   });
 
@@ -97,6 +118,7 @@ function createBridgeMcpServer(
       before_message_id: z.string().optional(),
     },
     async (args) => structured(store.recentMessages(
+      "qq",
       args.target_type as SourceType,
       args.target_id,
       args.limit,
@@ -114,6 +136,7 @@ function createBridgeMcpServer(
     },
     async (args) => structured(store.getMessage(
       args.message_id,
+      "qq",
       args.target_type as SourceType | undefined,
       args.target_id,
     )),
@@ -128,6 +151,7 @@ function createBridgeMcpServer(
       limit: z.number().int().min(1).max(100).default(100),
     },
     async (args) => structured(store.unreadMessages(
+      "qq",
       args.target_type as SourceType,
       args.target_id,
       args.limit,
@@ -144,6 +168,7 @@ function createBridgeMcpServer(
       limit: z.number().int().min(1).max(100).default(20),
     },
     async (args) => structured(store.searchMessages(
+      "qq",
       args.target_type as SourceType,
       args.target_id,
       args.query,
@@ -163,7 +188,7 @@ function createBridgeMcpServer(
       configured_groups: config.qq.allowedGroupIds,
       always_trigger_groups: config.qq.alwaysTriggerGroupIds,
       configured_private_users: config.qq.allowedPrivateUserIds,
-      conversation: store.conversationState(args.target_type as SourceType, args.target_id),
+      conversation: store.conversationState("qq", args.target_type as SourceType, args.target_id),
     }),
   );
 
@@ -179,7 +204,7 @@ function createBridgeMcpServer(
       const attachment = args.attachment_id != null
         ? store.getAttachment(args.attachment_id)
         : args.message_id
-          ? store.getAttachmentsForMessage(args.message_id)[args.attachment_index]
+          ? store.getAttachmentsForMessage(args.message_id, "qq")[args.attachment_index]
           : null;
       if (!attachment) {
         throw new Error("attachment not found");
@@ -304,13 +329,217 @@ function createBridgeMcpServer(
   );
 
   registerGroupAdminTools(server, config, onebot);
+  if (telegram) {
+    registerTelegramTools(server, config, telegram, store);
+  }
 
   return server;
+}
+
+function registerTelegramTools(
+  server: McpServer,
+  config: BridgeConfig,
+  telegram: TelegramClient,
+  store: MessageStore,
+): void {
+  server.tool(
+    "telegram_get_recent_messages",
+    "Get recent stored Telegram messages for a private chat, group, supergroup, or channel.",
+    {
+      chat_id: z.string(),
+      target_type: z.enum(["group", "private"]).default("group"),
+      limit: z.number().int().min(1).max(100).default(20),
+      before_message_id: z.string().optional(),
+    },
+    async (args) => structured(store.recentMessages(
+      "telegram",
+      args.target_type as SourceType,
+      args.chat_id,
+      args.limit,
+      args.before_message_id,
+    )),
+  );
+
+  server.tool(
+    "telegram_get_message",
+    "Get one stored Telegram message by Telegram message_id.",
+    {
+      message_id: z.string(),
+      chat_id: z.string().optional(),
+      target_type: z.enum(["group", "private"]).optional(),
+    },
+    async (args) => structured(store.getMessage(
+      args.message_id,
+      "telegram",
+      args.target_type as SourceType | undefined,
+      args.chat_id,
+    )),
+  );
+
+  server.tool(
+    "telegram_get_unread_messages",
+    "Get the current unread batch for a Telegram chat. This returns the messages counted by the latest conversation_unread prompt.",
+    {
+      chat_id: z.string(),
+      target_type: z.enum(["group", "private"]).default("group"),
+      limit: z.number().int().min(1).max(100).default(100),
+    },
+    async (args) => structured(store.unreadMessages(
+      "telegram",
+      args.target_type as SourceType,
+      args.chat_id,
+      args.limit,
+    )),
+  );
+
+  server.tool(
+    "telegram_search_messages",
+    "Search stored Telegram text messages in one chat.",
+    {
+      chat_id: z.string(),
+      target_type: z.enum(["group", "private"]).default("group"),
+      query: z.string(),
+      limit: z.number().int().min(1).max(100).default(20),
+    },
+    async (args) => structured(store.searchMessages(
+      "telegram",
+      args.target_type as SourceType,
+      args.chat_id,
+      args.query,
+      args.limit,
+    )),
+  );
+
+  server.tool(
+    "telegram_download_media",
+    "Download a stored Telegram attachment to the local media cache and return its path.",
+    {
+      attachment_id: z.number().int().optional(),
+      message_id: z.string().optional(),
+      attachment_index: z.number().int().min(0).default(0),
+    },
+    async (args) => {
+      const attachment = args.attachment_id != null
+        ? store.getAttachment(args.attachment_id)
+        : args.message_id
+          ? store.getAttachmentsForMessage(args.message_id, "telegram")[args.attachment_index]
+          : null;
+      if (!attachment) {
+        throw new Error("attachment not found");
+      }
+      const filePath = await telegram.downloadAttachment(store, attachment);
+      return structured({ path: filePath, attachment });
+    },
+  );
+
+  server.tool(
+    "telegram_send_message",
+    "Send a Telegram message. Supports ordered text and mention parts, topic thread ids, and replies.",
+    {
+      chat_id: z.string(),
+      message: z.string().default(""),
+      parts: z.array(telegramOutboundPartSchema).optional(),
+      reply_to_message_id: z.string().optional(),
+      message_thread_id: z.string().optional(),
+    },
+    async (args) => {
+      const outbound = telegramOutboundText({
+        message: args.message,
+        parts: args.parts,
+      });
+      const response = await telegram.sendMessage({
+        chatId: args.chat_id,
+        text: outbound.html,
+        parseMode: "HTML",
+        replyToMessageId: args.reply_to_message_id,
+        messageThreadId: args.message_thread_id,
+      });
+      await saveTelegramOutboundMessage(config, telegram, store, {
+        chatId: args.chat_id,
+        action: "sendMessage",
+        response,
+        segments: outbound.segments,
+        replyToMessageId: args.reply_to_message_id,
+      });
+      return structured(response);
+    },
+  );
+
+  server.tool(
+    "telegram_send_file",
+    "Send a local path, Telegram file_id, or HTTP URL to a Telegram chat as a document/file. Images are sent as files to preserve quality.",
+    {
+      chat_id: z.string(),
+      file: z.string(),
+      caption: z.string().default(""),
+      reply_to_message_id: z.string().optional(),
+      message_thread_id: z.string().optional(),
+    },
+    async (args) => {
+      const response = await telegram.sendFile({
+        chatId: args.chat_id,
+        file: args.file,
+        caption: args.caption,
+        replyToMessageId: args.reply_to_message_id,
+        messageThreadId: args.message_thread_id,
+      });
+      const segments: MessageSegment[] = [
+        ...(args.caption.trim() ? [{ type: "text", data: { text: args.caption } }] : []),
+        { type: "file", data: { file: args.file, name: args.file.split("/").pop() } },
+      ];
+      await saveTelegramOutboundMessage(config, telegram, store, {
+        chatId: args.chat_id,
+        action: "sendDocument",
+        response,
+        segments,
+        replyToMessageId: args.reply_to_message_id,
+      });
+      return structured(response);
+    },
+  );
+
+  server.tool(
+    "telegram_delete_message",
+    "Delete or recall a Telegram message. Requires confirm:true because Telegram may delete messages for everyone when permissions allow it.",
+    {
+      chat_id: z.string(),
+      message_id: z.string(),
+      confirm: z.boolean().default(false),
+    },
+    async (args) => {
+      if (!args.confirm) {
+        throw new Error("telegram_delete_message requires confirm:true");
+      }
+      const response = await telegram.deleteMessage(args.chat_id, args.message_id);
+      log("telegram delete message completed", {
+        chatId: args.chat_id,
+        messageId: args.message_id,
+      });
+      return structured({ ok: response });
+    },
+  );
+
+  server.tool(
+    "telegram_get_conversation_state",
+    "Get bridge state for a Telegram chat.",
+    {
+      chat_id: z.string(),
+      target_type: z.enum(["group", "private"]).default("group"),
+    },
+    async (args) => structured({
+      bot_user_id: telegram.botUserId(),
+      bot_username: telegram.botUsername(),
+      configured_chat_ids: config.telegram.allowedChatIds,
+      always_trigger_chat_ids: config.telegram.alwaysTriggerChatIds,
+      conversation: store.conversationState("telegram", args.target_type as SourceType, args.chat_id),
+    }),
+  );
 }
 
 async function startHttpMcpServer(
   config: BridgeConfig,
   onebot: OneBotClient,
+  telegram: TelegramClient | null,
   store: MessageStore,
   astral: AstralAppServerClient,
 ): Promise<void> {
@@ -335,7 +564,7 @@ async function startHttpMcpServer(
   });
 
   app.get("/api/dashboard/state", (_req: IncomingMessage, res: ServerResponse) => {
-    writeJson(res, 200, dashboardState(config, onebot, astral, store, externalEventBatcher));
+    writeJson(res, 200, dashboardState(config, onebot, telegram, astral, store, externalEventBatcher));
   });
 
   if (config.externalEvents.enabled) {
@@ -392,7 +621,7 @@ async function startHttpMcpServer(
     req: IncomingMessage & { body?: unknown },
     res: ServerResponse,
   ) => {
-    const server = createBridgeMcpServer(config, onebot, store);
+    const server = createBridgeMcpServer(config, onebot, telegram, store);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -771,6 +1000,152 @@ function externalEventApiSchema(config: BridgeConfig): Record<string, unknown> {
   };
 }
 
+async function saveTelegramOutboundMessage(
+  _config: BridgeConfig,
+  telegram: TelegramClient,
+  store: MessageStore,
+  options: {
+    chatId: string;
+    action: string;
+    response: TelegramMessage;
+    segments: MessageSegment[];
+    replyToMessageId?: string | null;
+  },
+): Promise<void> {
+  try {
+    const stored = buildTelegramOutboundMessage({
+      chatId: options.chatId,
+      chatTitle: telegramChatTitle(options.response),
+      botUserId: telegram.botUserId(),
+      botUsername: telegram.botUsername(),
+      message: options.response,
+      segments: options.segments,
+      action: options.action,
+      response: options.response,
+      replyToMessageId: options.replyToMessageId,
+    });
+    store.saveMessage(stored);
+    log("stored outbound telegram message", {
+      sourceType: stored.sourceType,
+      targetId: stored.targetId,
+      messageId: stored.platformMessageId,
+      action: options.action,
+    });
+  } catch (err) {
+    error("failed to store outbound telegram message", {
+      chatId: options.chatId,
+      action: options.action,
+      error: String(err),
+    });
+  }
+}
+
+function telegramOutboundText(options: TelegramOutboundTextOptions): {
+  html: string;
+  segments: MessageSegment[];
+} {
+  const htmlParts: string[] = [];
+  const plainParts: string[] = [];
+  const segments: MessageSegment[] = [];
+
+  if (options.parts && options.parts.length > 0) {
+    for (const part of options.parts) {
+      appendTelegramOutboundPart(part, htmlParts, plainParts, segments);
+    }
+  }
+
+  if (shouldAppendTelegramMessage(options, plainParts.join(""))) {
+    if (htmlParts.length > 0) {
+      htmlParts.push("\n");
+      plainParts.push("\n");
+    }
+    htmlParts.push(escapeHtml(options.message));
+    plainParts.push(options.message);
+    segments.push({ type: "text", data: { text: options.message } });
+  }
+
+  const html = htmlParts.join("");
+  if (!html.trim()) {
+    throw new Error("telegram_send_message requires non-empty message text or parts");
+  }
+  return { html, segments };
+}
+
+function appendTelegramOutboundPart(
+  part: TelegramOutboundPart,
+  htmlParts: string[],
+  plainParts: string[],
+  segments: MessageSegment[],
+): void {
+  if (part.type === "text") {
+    if (part.text && part.text.length > 0) {
+      htmlParts.push(escapeHtml(part.text));
+      plainParts.push(part.text);
+      segments.push({ type: "text", data: { text: part.text } });
+    }
+    return;
+  }
+
+  const username = part.username?.replace(/^@/, "").trim();
+  if (username) {
+    const mention = `@${username}`;
+    htmlParts.push(escapeHtml(mention));
+    plainParts.push(mention);
+    segments.push({ type: "mention", data: { username, text: mention } });
+    return;
+  }
+
+  const userId = part.user_id?.trim();
+  if (userId) {
+    const label = part.text?.trim() || userId;
+    htmlParts.push(`<a href="tg://user?id=${escapeHtmlAttribute(userId)}">${escapeHtml(label)}</a>`);
+    plainParts.push(label);
+    segments.push({ type: "mention", data: { user_id: userId, text: label } });
+  }
+}
+
+function shouldAppendTelegramMessage(options: TelegramOutboundTextOptions, partsText: string): boolean {
+  const message = options.message.trim();
+  if (!message) {
+    return false;
+  }
+  if (!options.parts || options.parts.length === 0) {
+    return true;
+  }
+  if (!partsText.trim()) {
+    return true;
+  }
+  const normalizedMessage = normalizeTextForDupCheck(message);
+  const normalizedParts = normalizeTextForDupCheck(partsText);
+  return !normalizedMessage.includes(normalizedParts)
+    && !normalizedParts.includes(normalizedMessage);
+}
+
+function telegramChatTitle(message: TelegramMessage): string | null {
+  const chat = message.chat;
+  const title = chat.title ?? [chat.first_name, chat.last_name].filter(Boolean).join(" ").trim() ?? chat.username;
+  return title || chat.username || null;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>]/g, (char) => {
+    switch (char) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      default:
+        return char;
+    }
+  });
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return escapeHtml(value).replace(/"/g, "&quot;");
+}
+
 async function sendQqActionWithDelay<T>(
   onebot: OneBotClient,
   action: string,
@@ -803,6 +1178,7 @@ async function saveOutboundMessage(
     const platformMessageId = oneBotResponseMessageId(options.response)
       ?? syntheticOutboundMessageId(options.sourceType, options.targetId);
     const stored = buildOutboundStoredMessage({
+      platform: "qq",
       platformMessageId,
       sourceType: options.sourceType,
       targetId: options.targetId,

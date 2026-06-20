@@ -10,6 +10,18 @@ const defaultConfig: BridgeConfig = {
     accessToken: null,
     actionTimeoutMs: 10_000,
   },
+  telegram: {
+    enabled: false,
+    botToken: "",
+    botUsername: "",
+    allowedChatIds: [],
+    alwaysTriggerChatIds: [],
+    triggerKeywords: [],
+    recordUntriggered: true,
+    pollTimeoutSeconds: 25,
+    pollIntervalMs: 1_000,
+    apiBaseUrl: "https://api.telegram.org",
+  },
   mcp: {
     transport: "stdio",
     host: "127.0.0.1",
@@ -29,6 +41,7 @@ const defaultConfig: BridgeConfig = {
     allowedGroupIds: [],
     alwaysTriggerGroupIds: [],
     allowedPrivateUserIds: [],
+    triggerKeywords: [],
     recordUntriggered: true,
   },
   externalEvents: {
@@ -78,6 +91,7 @@ function readJsonConfig(configPath: string): Partial<BridgeConfig> {
 function mergeConfig(base: BridgeConfig, patch: Partial<BridgeConfig>): BridgeConfig {
   return {
     onebot: { ...base.onebot, ...patch.onebot },
+    telegram: { ...base.telegram, ...patch.telegram },
     mcp: { ...base.mcp, ...patch.mcp },
     astral: { ...base.astral, ...patch.astral },
     qq: { ...base.qq, ...patch.qq },
@@ -97,6 +111,31 @@ function applyEnvOverrides(config: BridgeConfig): void {
     envList("ASTRAL_BRIDGE_ALWAYS_TRIGGER_GROUP_IDS") ?? config.qq.alwaysTriggerGroupIds;
   config.qq.allowedPrivateUserIds =
     envList("ASTRAL_BRIDGE_ALLOWED_PRIVATE_USER_IDS") ?? config.qq.allowedPrivateUserIds;
+  config.qq.triggerKeywords =
+    envList("ASTRAL_BRIDGE_TRIGGER_KEYWORDS") ?? config.qq.triggerKeywords;
+  config.telegram.enabled =
+    parseBoolean(process.env.ASTRAL_BRIDGE_TELEGRAM_ENABLED) ?? config.telegram.enabled;
+  config.telegram.botToken =
+    process.env.ASTRAL_BRIDGE_TELEGRAM_BOT_TOKEN ?? config.telegram.botToken;
+  config.telegram.botUsername =
+    process.env.ASTRAL_BRIDGE_TELEGRAM_BOT_USERNAME ?? config.telegram.botUsername;
+  config.telegram.allowedChatIds =
+    envList("ASTRAL_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS") ?? config.telegram.allowedChatIds;
+  config.telegram.alwaysTriggerChatIds =
+    envList("ASTRAL_BRIDGE_TELEGRAM_ALWAYS_TRIGGER_CHAT_IDS") ?? config.telegram.alwaysTriggerChatIds;
+  config.telegram.triggerKeywords =
+    envList("ASTRAL_BRIDGE_TELEGRAM_TRIGGER_KEYWORDS") ?? config.telegram.triggerKeywords;
+  config.telegram.recordUntriggered =
+    parseBoolean(process.env.ASTRAL_BRIDGE_TELEGRAM_RECORD_UNTRIGGERED)
+    ?? config.telegram.recordUntriggered;
+  config.telegram.pollTimeoutSeconds =
+    parsePositiveInteger(process.env.ASTRAL_BRIDGE_TELEGRAM_POLL_TIMEOUT_SECONDS)
+    ?? config.telegram.pollTimeoutSeconds;
+  config.telegram.pollIntervalMs =
+    parsePositiveInteger(process.env.ASTRAL_BRIDGE_TELEGRAM_POLL_INTERVAL_MS)
+    ?? config.telegram.pollIntervalMs;
+  config.telegram.apiBaseUrl =
+    process.env.ASTRAL_BRIDGE_TELEGRAM_API_BASE_URL ?? config.telegram.apiBaseUrl;
   config.mcp.transport = parseMcpTransport(process.env.ASTRAL_BRIDGE_MCP_TRANSPORT) ?? config.mcp.transport;
   config.externalEvents.enabled =
     parseBoolean(process.env.ASTRAL_BRIDGE_EVENT_API_ENABLED) ?? config.externalEvents.enabled;
@@ -122,6 +161,18 @@ function validateConfig(config: BridgeConfig): void {
   }
   if (!Number.isInteger(config.onebot.port) || config.onebot.port <= 0) {
     throw new Error("onebot.port must be a positive integer");
+  }
+  if (config.telegram.enabled && !config.telegram.botToken.trim()) {
+    throw new Error("telegram.botToken is required when telegram.enabled is true");
+  }
+  if (!Number.isInteger(config.telegram.pollTimeoutSeconds) || config.telegram.pollTimeoutSeconds <= 0) {
+    throw new Error("telegram.pollTimeoutSeconds must be a positive integer");
+  }
+  if (!Number.isInteger(config.telegram.pollIntervalMs) || config.telegram.pollIntervalMs <= 0) {
+    throw new Error("telegram.pollIntervalMs must be a positive integer");
+  }
+  if (!config.telegram.apiBaseUrl.startsWith("http://") && !config.telegram.apiBaseUrl.startsWith("https://")) {
+    throw new Error("telegram.apiBaseUrl must be an http(s) URL");
   }
   if (!Number.isInteger(config.mcp.port) || config.mcp.port <= 0) {
     throw new Error("mcp.port must be a positive integer");
@@ -150,7 +201,14 @@ function validateConfig(config: BridgeConfig): void {
   config.qq.allowedGroupIds = normalizeIdList(config.qq.allowedGroupIds);
   config.qq.alwaysTriggerGroupIds = normalizeIdList(config.qq.alwaysTriggerGroupIds);
   config.qq.allowedPrivateUserIds = normalizeIdList(config.qq.allowedPrivateUserIds);
+  config.qq.triggerKeywords = normalizeIdList(config.qq.triggerKeywords);
   config.qq.botUserId = String(config.qq.botUserId);
+  config.telegram.allowedChatIds = normalizeIdList(config.telegram.allowedChatIds);
+  config.telegram.alwaysTriggerChatIds = normalizeIdList(config.telegram.alwaysTriggerChatIds);
+  config.telegram.triggerKeywords = normalizeIdList(config.telegram.triggerKeywords);
+  config.telegram.botToken = String(config.telegram.botToken);
+  config.telegram.botUsername = String(config.telegram.botUsername).replace(/^@/, "");
+  config.telegram.apiBaseUrl = config.telegram.apiBaseUrl.replace(/\/+$/, "");
 }
 
 function envList(name: string): string[] | null {

@@ -25,7 +25,20 @@
     "allowedGroupIds": [],
     "alwaysTriggerGroupIds": [],
     "allowedPrivateUserIds": [],
+    "triggerKeywords": [],
     "recordUntriggered": true
+  },
+  "telegram": {
+    "enabled": false,
+    "botToken": "",
+    "botUsername": "",
+    "allowedChatIds": [],
+    "alwaysTriggerChatIds": [],
+    "triggerKeywords": [],
+    "recordUntriggered": true,
+    "pollTimeoutSeconds": 25,
+    "pollIntervalMs": 1000,
+    "apiBaseUrl": "https://api.telegram.org"
   },
   "externalEvents": {
     "enabled": true,

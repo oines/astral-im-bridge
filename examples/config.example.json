@@ -25,7 +25,20 @@
     "allowedGroupIds": ["REPLACE_GROUP_ID"],
     "alwaysTriggerGroupIds": [],
     "allowedPrivateUserIds": ["REPLACE_USER_ID"],
+    "triggerKeywords": ["astral", "bot"],
     "recordUntriggered": true
+  },
+  "telegram": {
+    "enabled": false,
+    "botToken": "REPLACE_WITH_TELEGRAM_BOT_TOKEN",
+    "botUsername": "REPLACE_WITH_TELEGRAM_BOT_USERNAME",
+    "allowedChatIds": ["REPLACE_TELEGRAM_CHAT_ID"],
+    "alwaysTriggerChatIds": [],
+    "triggerKeywords": ["astral", "bot"],
+    "recordUntriggered": true,
+    "pollTimeoutSeconds": 25,
+    "pollIntervalMs": 1000,
+    "apiBaseUrl": "https://api.telegram.org"
   },
   "externalEvents": {
     "enabled": true,

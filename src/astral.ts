@@ -77,7 +77,7 @@ export class AstralAppServerClient extends EventEmitter {
   private async submitInboundMessageNow(message: StoredMessage): Promise<void> {
     await this.ensureThread();
     const input = this.buildInput(buildAstralPrompt(message), message.attachments);
-    const clientUserMessageId = `qq:${message.sourceType}:${message.targetId}:${message.platformMessageId}`;
+    const clientUserMessageId = `${message.platform}:${message.sourceType}:${message.targetId}:${message.platformMessageId}`;
     await this.submitInput(clientUserMessageId, input, message.platformMessageId);
   }
 

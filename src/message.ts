@@ -3,6 +3,7 @@ import type {
   GroupInfo,
   MessageSegment,
   OneBotMessageEvent,
+  Platform,
   SourceType,
   StoredAttachment,
   StoredMessage,
@@ -10,6 +11,7 @@ import type {
 } from "./types.js";
 
 interface OutboundStoredMessageOptions {
+  platform: Platform;
   platformMessageId: string;
   sourceType: SourceType;
   targetId: string;
@@ -122,6 +124,7 @@ export function buildStoredMessage(
   const sender = event.sender ?? {};
 
   return {
+    platform: "qq",
     platformMessageId: String(event.message_id),
     sourceType,
     targetId,
@@ -146,6 +149,7 @@ export function buildOutboundStoredMessage(options: OutboundStoredMessageOptions
   const rawMessage = historyTextFromSegments(options.segments);
   const time = Math.floor(Date.now() / 1000);
   return {
+    platform: options.platform,
     platformMessageId: options.platformMessageId,
     sourceType: options.sourceType,
     targetId: options.targetId,
@@ -186,6 +190,13 @@ export function buildOutboundStoredMessage(options: OutboundStoredMessageOptions
 }
 
 export function buildAstralPrompt(message: StoredMessage): string {
+  if (message.platform === "telegram") {
+    return buildTelegramAstralPrompt(message);
+  }
+  return buildQqAstralPrompt(message);
+}
+
+function buildQqAstralPrompt(message: StoredMessage): string {
   const lines = [
     "[QQ inbound message]",
     `platform: onebot_v11 / napcat`,
@@ -270,6 +281,101 @@ export function buildAstralPrompt(message: StoredMessage): string {
   return lines.join("\n");
 }
 
+function buildTelegramAstralPrompt(message: StoredMessage): string {
+  const raw = isRecord(message.rawEvent) ? message.rawEvent : {};
+  const chat = isRecord(raw.chat) ? raw.chat : {};
+  const from = isRecord(raw.from) ? raw.from : {};
+  const entities = Array.isArray(raw.entities) ? raw.entities : [];
+  const threadId = raw.message_thread_id == null ? null : String(raw.message_thread_id);
+  const lines = [
+    "[Telegram inbound message]",
+    "platform: telegram",
+    `source_type: ${message.sourceType}`,
+    `chat_id: ${message.targetId}`,
+    `chat_type: ${String(chat.type ?? message.sourceType)}`,
+    `chat_title: ${message.groupName ?? ""}`,
+  ];
+  if (threadId) {
+    lines.push(`message_thread_id: ${threadId}`);
+  }
+  lines.push(`sender_user_id: ${message.userId}`);
+  lines.push(`sender_username: ${String(from.username ?? "")}`);
+  lines.push(`sender_display_name: ${message.nickname ?? ""}`);
+  lines.push(`message_id: ${message.platformMessageId}`);
+  lines.push(`time_unix: ${message.time}`);
+  lines.push(`trigger: ${message.trigger}`);
+  if (message.replyToMessageId) {
+    lines.push(`reply_to_message_id: ${message.replyToMessageId}`);
+  }
+
+  if (message.conversationUnread) {
+    lines.push("");
+    lines.push("conversation_unread:");
+    lines.push(`unread_count: ${message.conversationUnread.unreadCount}`);
+    lines.push(
+      "note: unread_count is the number of stored Telegram messages in this same chat since the previous Astral prompt, including the current message. When you need that surrounding context, telegram_get_unread_messages returns this unread batch and returns up to 100 messages by default.",
+    );
+  }
+
+  lines.push("");
+  lines.push("content:");
+  lines.push(message.rawMessage || message.text || "[non-text message]");
+
+  if (entities.length > 0) {
+    lines.push("");
+    lines.push("entities:");
+    lines.push(JSON.stringify(entities, null, 2));
+  }
+
+  if (message.attachments.length > 0) {
+    lines.push("");
+    lines.push("attachments:");
+    for (const [index, attachment] of message.attachments.entries()) {
+      const label = attachment.name ?? attachment.fileId ?? attachment.url ?? "unnamed";
+      lines.push(`- index: ${index}`);
+      lines.push(`  kind: ${attachment.kind}`);
+      lines.push(`  label: ${label}`);
+      if (attachment.fileId) {
+        lines.push(`  file_id: ${attachment.fileId}`);
+      }
+      if (attachment.mimeType) {
+        lines.push(`  mime_type: ${attachment.mimeType}`);
+      }
+      if (attachment.size != null) {
+        lines.push(`  size: ${attachment.size}`);
+      }
+    }
+  }
+
+  lines.push("");
+  lines.push("history:");
+  lines.push(
+    "Use Telegram MCP tools mcp__telegram__telegram_get_unread_messages, mcp__telegram__telegram_get_recent_messages, mcp__telegram__telegram_get_message, mcp__telegram__telegram_search_messages, or mcp__telegram__telegram_download_media when you need more Telegram context or media content.",
+  );
+  lines.push("");
+  lines.push("reply_policy:");
+  lines.push(
+    "Normally reply to this Telegram message by calling a Telegram MCP send tool in the same chat it came from. Do not only output plain text: plain text is not sent to Telegram, so the sender will not see it.",
+  );
+  lines.push(
+    "For text replies call mcp__telegram__telegram_send_message with chat_id and optional reply_to_message_id. If message_thread_id is present, pass it so the reply stays in the same topic.",
+  );
+  lines.push(
+    "To send images or any non-text file, create or reuse a file under /workspace or /app/media, then call mcp__telegram__telegram_send_file with chat_id, file, optional caption, and optional reply_to_message_id. Images are intentionally sent as files/documents to preserve quality.",
+  );
+  lines.push(
+    "To mention people, use telegram_send_message parts in the exact order you want: {type:\"text\",text:\"...\"}, {type:\"mention\",username:\"alice\"}, or {type:\"mention\",user_id:\"123456\",text:\"Alice\"}. Use user_id mentions only when the user id is known.",
+  );
+  lines.push(
+    "To delete a Telegram message, call mcp__telegram__telegram_delete_message with chat_id and message_id. Telegram may reject deletion if the bot lacks admin permission or the message is outside Telegram's deletion rules.",
+  );
+  lines.push(
+    "When writing tool string arguments, avoid raw unescaped double quotes inside strings; use Chinese corner quotes like 「...」 or escape quotes so the tool call stays valid JSON.",
+  );
+
+  return lines.join("\n");
+}
+
 export function buildExternalEventPrompt(event: ExternalEvent): string {
   const lines = [
     "[External event]",
@@ -305,7 +411,7 @@ export function buildExternalEventPrompt(event: ExternalEvent): string {
   lines.push("");
   lines.push("event_policy:");
   lines.push(
-    "This is an external system event delivered through Astral Bridge. Decide whether it needs action. If you need to notify QQ users, call the QQ MCP send tools; plain text output is not visible to QQ.",
+    "This is an external system event delivered through Astral Bridge. Decide whether it needs action. If you need to notify chat users, call the appropriate QQ or Telegram MCP send tools; plain text output is not visible to chat platforms.",
   );
 
   return lines.join("\n");
@@ -319,6 +425,10 @@ function firstString(data: Record<string, unknown>, keys: string[]): string | nu
     }
   }
   return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function firstNumber(data: Record<string, unknown>, keys: string[]): number | null {

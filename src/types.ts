@@ -1,14 +1,17 @@
+export type Platform = "qq" | "telegram";
 export type SourceType = "group" | "private";
 export type TriggerKind =
   | "group_mention"
   | "group_reply"
   | "group_always"
+  | "keyword"
   | "private_message"
   | "bot_message"
   | "none";
 
 export interface BridgeConfig {
   onebot: OneBotConfig;
+  telegram: TelegramConfig;
   mcp: McpConfig;
   astral: AstralConfig;
   qq: QqConfig;
@@ -22,6 +25,19 @@ export interface OneBotConfig {
   path: string;
   accessToken: string | null;
   actionTimeoutMs: number;
+}
+
+export interface TelegramConfig {
+  enabled: boolean;
+  botToken: string;
+  botUsername: string;
+  allowedChatIds: string[];
+  alwaysTriggerChatIds: string[];
+  triggerKeywords: string[];
+  recordUntriggered: boolean;
+  pollTimeoutSeconds: number;
+  pollIntervalMs: number;
+  apiBaseUrl: string;
 }
 
 export interface McpConfig {
@@ -45,6 +61,7 @@ export interface QqConfig {
   allowedGroupIds: string[];
   alwaysTriggerGroupIds: string[];
   allowedPrivateUserIds: string[];
+  triggerKeywords: string[];
   recordUntriggered: boolean;
 }
 
@@ -115,6 +132,7 @@ export interface StoredAttachment {
 
 export interface StoredMessage {
   id?: number;
+  platform: Platform;
   platformMessageId: string;
   sourceType: SourceType;
   targetId: string;
@@ -140,6 +158,7 @@ export interface ConversationUnread {
 
 export interface StoredMessageRow {
   id: number;
+  platform: Platform;
   platform_message_id: string;
   source_type: SourceType;
   target_id: string;
