@@ -123,6 +123,13 @@ export interface TelegramSendFileOptions {
   messageThreadId?: string;
 }
 
+export interface TelegramSetReactionOptions {
+  chatId: string;
+  messageId: string;
+  emoji: string;
+  isBig?: boolean;
+}
+
 export class TelegramClient extends EventEmitter<TelegramEvents> {
   private running = false;
   private pollPromise: Promise<void> | null = null;
@@ -214,6 +221,15 @@ export class TelegramClient extends EventEmitter<TelegramEvents> {
     return this.api<boolean>("deleteMessage", {
       chat_id: telegramId(chatId),
       message_id: telegramId(messageId),
+    });
+  }
+
+  async setReaction(options: TelegramSetReactionOptions): Promise<boolean> {
+    return this.api<boolean>("setMessageReaction", {
+      chat_id: telegramId(options.chatId),
+      message_id: telegramId(options.messageId),
+      reaction: [{ type: "emoji", emoji: options.emoji }],
+      ...(options.isBig == null ? {} : { is_big: options.isBig }),
     });
   }
 

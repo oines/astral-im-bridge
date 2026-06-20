@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -10,16 +11,17 @@ import { dashboardHtml, dashboardState } from "./dashboard.js";
 import { ExternalEventBatcher } from "./event_batcher.js";
 import { registerGroupAdminTools } from "./group_admin_tools.js";
 import { error, log, warn } from "./logger.js";
-import { ensureAttachmentDownloaded } from "./media.js";
+import { downloadAttachmentFromUrl, ensureAttachmentDownloaded } from "./media.js";
 import { buildOutboundStoredMessage, replySegmentMessageId } from "./message.js";
 import type { OneBotClient } from "./onebot.js";
+import { QQ_REACTION_EMOJI_IDS, TELEGRAM_REACTION_EMOJIS } from "./reactions.js";
 import type { MessageStore } from "./store.js";
 import {
   buildTelegramOutboundMessage,
   TelegramClient,
   type TelegramMessage,
 } from "./telegram.js";
-import type { BridgeConfig, ExternalEvent, MessageSegment, SourceType } from "./types.js";
+import type { BridgeConfig, ExternalEvent, MessageSegment, SourceType, StoredAttachment } from "./types.js";
 
 const QQ_SEND_DELAY_MIN_MS = 3000;
 const QQ_SEND_DELAY_MAX_MS = 5000;
@@ -209,8 +211,45 @@ function createBridgeMcpServer(
       if (!attachment) {
         throw new Error("attachment not found");
       }
-      const filePath = await ensureAttachmentDownloaded(store, attachment);
+      const filePath = await downloadQqAttachment(store, onebot, attachment);
       return structured({ path: filePath, attachment });
+    },
+  );
+
+  server.tool(
+    "qq_set_reaction",
+    `React to a stored QQ group message with a QQ emoji id. QQ only supports message reactions in group chats. Available/common emoji_id values: ${QQ_REACTION_EMOJI_IDS}.`,
+    {
+      message_id: z.string(),
+      emoji_id: z.string().default("76"),
+      group_id: z.string().optional(),
+    },
+    async (args) => {
+      const stored = args.group_id
+        ? store.getMessage(args.message_id, "qq", "group", args.group_id)
+        : store.getMessage(args.message_id, "qq");
+      if (!stored) {
+        throw new Error("qq_set_reaction requires a stored QQ group message_id");
+      }
+      if (stored.sourceType !== "group") {
+        throw new Error("qq_set_reaction only supports QQ group messages");
+      }
+      const response = await onebot.callAction("set_msg_emoji_like", {
+        message_id: oneBotId(args.message_id),
+        emoji_id: args.emoji_id,
+      });
+      log("qq set reaction completed", {
+        groupId: stored.targetId,
+        messageId: args.message_id,
+        emojiId: args.emoji_id,
+      });
+      return structured({
+        ok: true,
+        message_id: args.message_id,
+        group_id: stored.targetId,
+        emoji_id: args.emoji_id,
+        response,
+      });
     },
   );
 
@@ -334,6 +373,115 @@ function createBridgeMcpServer(
   }
 
   return server;
+}
+
+async function downloadQqAttachment(
+  store: MessageStore,
+  onebot: OneBotClient,
+  attachment: StoredAttachment,
+): Promise<string> {
+  const errors: string[] = [];
+  try {
+    return await ensureAttachmentDownloaded(store, attachment);
+  } catch (err) {
+    errors.push(String(err));
+  }
+
+  if (attachment.url) {
+    const cookies = await qqCookieCandidates(onebot, attachment.url);
+    for (const cookie of cookies) {
+      try {
+        return await downloadAttachmentFromUrl(store, attachment, attachment.url, {
+          cookie,
+          referer: "https://im.qq.com/",
+          "user-agent": "Mozilla/5.0",
+        });
+      } catch (err) {
+        errors.push(String(err));
+      }
+    }
+  }
+
+  if (attachment.kind === "image") {
+    const file = attachment.fileId ?? attachment.name;
+    if (file) {
+      try {
+        const response = await onebot.callAction<{ data?: unknown }>("get_image", { file });
+        const data = asRecord((response as { data?: unknown }).data);
+        const imageUrl = stringField(data, "url");
+        if (imageUrl) {
+          return await downloadAttachmentFromUrl(store, attachment, imageUrl);
+        }
+        const imageFile = stringField(data, "file");
+        if (imageFile) {
+          return await downloadAttachmentFromOneBotFile(store, attachment, imageFile);
+        }
+      } catch (err) {
+        errors.push(String(err));
+      }
+    }
+  }
+
+  throw new Error(`failed to download QQ media: ${errors.join("; ")}`);
+}
+
+async function qqCookieCandidates(onebot: OneBotClient, url: string): Promise<string[]> {
+  const host = safeHostname(url);
+  const requests = [
+    host ? onebot.callAction<{ data?: unknown }>("get_cookies", { domain: host }).catch(() => null) : null,
+    onebot.callAction<{ data?: unknown }>("get_cookies", {}).catch(() => null),
+    onebot.callAction<{ data?: unknown }>("get_credentials", {}).catch(() => null),
+  ].filter(Boolean) as Promise<{ data?: unknown } | null>[];
+
+  const responses = await Promise.all(requests);
+  const cookies = responses
+    .map((response) => stringField(asRecord(response?.data), "cookies"))
+    .filter((cookie): cookie is string => Boolean(cookie));
+  return [...new Set(cookies)];
+}
+
+async function downloadAttachmentFromOneBotFile(
+  store: MessageStore,
+  attachment: StoredAttachment,
+  file: string,
+): Promise<string> {
+  if (file.startsWith("http://") || file.startsWith("https://")) {
+    return downloadAttachmentFromUrl(store, attachment, file);
+  }
+  if (file.startsWith("file://")) {
+    const fileUrl = new URL(file);
+    const filePath = decodeURIComponent(fileUrl.pathname);
+    if (filePath && fs.existsSync(filePath)) {
+      if (attachment.id != null) {
+        store.updateAttachmentPath(attachment.id, filePath);
+      }
+      return filePath;
+    }
+  }
+  if (file.startsWith("/") && fs.existsSync(file)) {
+    if (attachment.id != null) {
+      store.updateAttachmentPath(attachment.id, file);
+    }
+    return file;
+  }
+  throw new Error(`OneBot returned a non-downloadable file path: ${file}`);
+}
+
+function safeHostname(url: string): string | null {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return null;
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === "string" && value ? value : null;
 }
 
 function registerTelegramTools(
@@ -516,6 +664,36 @@ function registerTelegramTools(
         messageId: args.message_id,
       });
       return structured({ ok: response });
+    },
+  );
+
+  server.tool(
+    "telegram_set_reaction",
+    `React to a Telegram group or private message with one standard reaction emoji. Use this instead of sending text when a lightweight acknowledgement is enough. Available emoji: ${TELEGRAM_REACTION_EMOJIS}.`,
+    {
+      chat_id: z.string(),
+      message_id: z.string(),
+      emoji: z.string().min(1).default("👍"),
+      is_big: z.boolean().optional(),
+    },
+    async (args) => {
+      const response = await telegram.setReaction({
+        chatId: args.chat_id,
+        messageId: args.message_id,
+        emoji: args.emoji,
+        isBig: args.is_big,
+      });
+      log("telegram set reaction completed", {
+        chatId: args.chat_id,
+        messageId: args.message_id,
+        emoji: args.emoji,
+      });
+      return structured({
+        ok: response,
+        chat_id: args.chat_id,
+        message_id: args.message_id,
+        emoji: args.emoji,
+      });
     },
   );
 

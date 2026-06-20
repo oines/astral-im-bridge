@@ -9,6 +9,7 @@ import type {
   StoredMessage,
   TriggerKind,
 } from "./types.js";
+import { QQ_REACTION_EMOJI_IDS, TELEGRAM_REACTION_EMOJIS } from "./reactions.js";
 
 interface OutboundStoredMessageOptions {
   platform: Platform;
@@ -269,6 +270,9 @@ function buildQqAstralPrompt(message: StoredMessage): string {
     "To reply to a specific QQ message, pass reply_to_message_id to mcp__qq__qq_send_group_message or mcp__qq__qq_send_private_message. You can get message ids from the current inbound message_id, mcp__qq__qq_get_recent_messages, mcp__qq__qq_get_message, or mcp__qq__qq_search_messages.",
   );
   lines.push(
+    `When a lightweight acknowledgement is enough, you may react to a QQ group message instead of sending text by calling mcp__qq__qq_set_reaction with message_id and emoji_id. QQ reactions only work in group chats. Available/common emoji_id values: ${QQ_REACTION_EMOJI_IDS}.`,
+  );
+  lines.push(
     "To send a non-image file, create or reuse the file under /workspace or /app/media, then call mcp__qq__qq_send_group_file with group_id and file, or mcp__qq__qq_send_private_file with user_id and file. Use the name argument when you want a friendly filename.",
   );
   lines.push(
@@ -368,6 +372,9 @@ function buildTelegramAstralPrompt(message: StoredMessage): string {
   );
   lines.push(
     "To delete a Telegram message, call mcp__telegram__telegram_delete_message with chat_id and message_id. Telegram may reject deletion if the bot lacks admin permission or the message is outside Telegram's deletion rules.",
+  );
+  lines.push(
+    `When a lightweight acknowledgement is enough, you may react instead of sending text by calling mcp__telegram__telegram_set_reaction with chat_id, message_id, and emoji. Telegram reactions work in both private and group chats. Available emoji: ${TELEGRAM_REACTION_EMOJIS}.`,
   );
   lines.push(
     "When writing tool string arguments, avoid raw unescaped double quotes inside strings; use Chinese corner quotes like 「...」 or escape quotes so the tool call stays valid JSON.",
