@@ -87,8 +87,9 @@ Start from `examples/config.example.json`:
     "authToken": null,
     "threadId": "REPLACE_WITH_FIXED_ASTRAL_THREAD_ID",
     "cwd": null,
+    "modelProvider": null,
     "model": null,
-    "includeImageInputs": true
+    "includeImageInputs": false
   },
   "qq": {
     "botUserId": "REPLACE_WITH_BOT_QQ",
@@ -135,6 +136,8 @@ Environment overrides:
 | `ASTRAL_BRIDGE_APP_SERVER_URL` | Astral app-server WebSocket URL. |
 | `ASTRAL_BRIDGE_APP_SERVER_AUTH_TOKEN` | Bearer token for Astral app-server. |
 | `ASTRAL_BRIDGE_THREAD_ID` | Fixed Astral thread/session id. |
+| `ASTRAL_BRIDGE_MODEL_PROVIDER` | Optional provider override for new turns and resumed fixed-thread settings. |
+| `ASTRAL_BRIDGE_MODEL` | Optional model override for new turns and resumed fixed-thread settings. |
 | `ASTRAL_BRIDGE_BOT_QQ` | Bot QQ user id. |
 | `ASTRAL_BRIDGE_ALLOWED_GROUP_IDS` | Comma-separated allowed group ids. |
 | `ASTRAL_BRIDGE_ALWAYS_TRIGGER_GROUP_IDS` | Comma-separated group ids where every non-bot message is forwarded to Astral. |
@@ -421,7 +424,9 @@ OrbStack deployment templates live under `deploy/orbstack`. They include:
 - `napcat`: NapCat Docker service.
 
 Copy `deploy/orbstack/.env.example` to `.env`, fill in your local values, and read
-`deploy/orbstack/README.md` before running the compose stack.
+the Chinese deployment guide at `deploy/orbstack/README.md` before running the compose
+stack. It covers required QQ/Telegram/Astral settings, persistent volumes, memory storage,
+and the memory phase2 sandbox option.
 
 ## Security Notes
 

@@ -3,9 +3,13 @@ import { loadConfig } from "./config.js";
 import { AstralAppServerClient } from "./astral.js";
 import { log, warn, error } from "./logger.js";
 import {
+  buildPokeStoredMessage,
   buildStoredMessage,
   isAtBot,
   normalizeSegments,
+  pokeSourceType,
+  pokeTargetId,
+  replyMessageIdFromEvent,
   replySegmentMessageId,
   targetIdFromEvent,
   textFromSegments,
@@ -25,7 +29,7 @@ import {
   TelegramClient,
   type TelegramMessage,
 } from "./telegram.js";
-import type { BridgeConfig, GroupInfo, OneBotMessageEvent, SourceType, TriggerKind } from "./types.js";
+import type { BridgeConfig, GroupInfo, OneBotMessageEvent, OneBotPokeNoticeEvent, SourceType, TriggerKind } from "./types.js";
 
 const STOP_TURN_COMMAND = "/stop";
 
@@ -41,6 +45,11 @@ async function main(): Promise<void> {
       error("failed to handle onebot message", { error: String(err) });
     });
   });
+  onebot.on("poke", (event) => {
+    void handleOneBotPoke(config, store, onebot, astral, event).catch((err) => {
+      error("failed to handle onebot poke", { error: String(err) });
+    });
+  });
   telegram?.on("message", (message) => {
     void handleTelegramMessage(config, store, telegram, astral, message).catch((err) => {
       error("failed to handle telegram message", { error: String(err) });
@@ -48,7 +57,9 @@ async function main(): Promise<void> {
   });
 
   await onebot.start();
-  await telegram?.start();
+  await telegram?.start().catch((err) => {
+    error("telegram startup failed; continuing without telegram polling", { error: String(err) });
+  });
   await startMcpServer(config, onebot, telegram, store, astral);
 }
 
@@ -70,7 +81,7 @@ async function handleOneBotMessage(
   }
 
   const segments = normalizeSegments(event.message);
-  const replyTo = replySegmentMessageId(segments);
+  const replyTo = replyMessageIdFromEvent(event, segments);
   if (isBotMessageEvent(event, config.qq.botUserId)) {
     const groupInfo = await fetchGroupInfoForEvent(onebot, sourceType, targetId);
     const stored = buildStoredMessage(event, groupInfo, "bot_message", replyTo);
@@ -129,6 +140,49 @@ async function handleOneBotMessage(
     sourceType,
     targetId,
     messageId: stored.platformMessageId,
+    trigger,
+    unreadCount: stored.conversationUnread?.unreadCount,
+  });
+  await astral.submitInboundMessage(stored);
+}
+
+async function handleOneBotPoke(
+  config: ReturnType<typeof loadConfig>,
+  store: MessageStore,
+  onebot: OneBotClient,
+  astral: AstralAppServerClient,
+  event: OneBotPokeNoticeEvent,
+): Promise<void> {
+  if (!isPokeAtBot(event, config.qq.botUserId)) {
+    return;
+  }
+  if (String(event.user_id) === config.qq.botUserId) {
+    return;
+  }
+
+  const sourceType = pokeSourceType(event);
+  const targetId = pokeTargetId(event);
+  if (!isAllowedTarget(config, sourceType, targetId)) {
+    return;
+  }
+
+  const groupInfo = await fetchGroupInfoForEvent(onebot, sourceType, targetId);
+  const trigger = sourceType === "group" ? "group_poke" : "private_poke";
+  const stored = buildPokeStoredMessage(event, groupInfo, trigger);
+  const messageRowId = store.saveMessage(stored);
+  stored.id = messageRowId;
+  stored.conversationUnread = store.claimUnreadForPrompt(
+    "qq",
+    stored.sourceType,
+    stored.targetId,
+    messageRowId,
+  );
+
+  log("forwarding qq poke to astral", {
+    sourceType,
+    targetId,
+    userId: String(event.user_id),
+    targetUserId: String(event.target_id),
     trigger,
     unreadCount: stored.conversationUnread?.unreadCount,
   });
@@ -363,6 +417,12 @@ function isBotSender(event: OneBotMessageEvent, botUserId: string): boolean {
 
 function isBotMessageEvent(event: OneBotMessageEvent, botUserId: string): boolean {
   return event.post_type === "message_sent" || isBotSender(event, botUserId);
+}
+
+function isPokeAtBot(event: OneBotPokeNoticeEvent, botUserId: string): boolean {
+  const targetId = String(event.target_id);
+  const selfId = event.self_id == null ? "" : String(event.self_id);
+  return targetId === botUserId || (selfId.length > 0 && targetId === selfId);
 }
 
 function isTelegramBotSender(message: TelegramMessage, botUserId: string): boolean {

@@ -33,8 +33,9 @@ const defaultConfig: BridgeConfig = {
     authToken: null,
     threadId: "",
     cwd: null,
+    modelProvider: null,
     model: null,
-    includeImageInputs: true,
+    includeImageInputs: false,
   },
   qq: {
     botUserId: "",
@@ -105,6 +106,9 @@ function applyEnvOverrides(config: BridgeConfig): void {
     process.env.ASTRAL_BRIDGE_APP_SERVER_URL ?? config.astral.appServerUrl;
   config.astral.threadId = process.env.ASTRAL_BRIDGE_THREAD_ID ?? config.astral.threadId;
   config.astral.authToken = process.env.ASTRAL_BRIDGE_APP_SERVER_AUTH_TOKEN ?? config.astral.authToken;
+  config.astral.modelProvider =
+    envString("ASTRAL_BRIDGE_MODEL_PROVIDER") ?? config.astral.modelProvider;
+  config.astral.model = envString("ASTRAL_BRIDGE_MODEL") ?? config.astral.model;
   config.qq.botUserId = process.env.ASTRAL_BRIDGE_BOT_QQ ?? config.qq.botUserId;
   config.qq.allowedGroupIds = envList("ASTRAL_BRIDGE_ALLOWED_GROUP_IDS") ?? config.qq.allowedGroupIds;
   config.qq.alwaysTriggerGroupIds =
@@ -209,6 +213,21 @@ function validateConfig(config: BridgeConfig): void {
   config.telegram.botToken = String(config.telegram.botToken);
   config.telegram.botUsername = String(config.telegram.botUsername).replace(/^@/, "");
   config.telegram.apiBaseUrl = config.telegram.apiBaseUrl.replace(/\/+$/, "");
+  config.astral.modelProvider = normalizeOptionalString(config.astral.modelProvider);
+  config.astral.model = normalizeOptionalString(config.astral.model);
+}
+
+function envString(name: string): string | null {
+  const value = process.env[name];
+  if (value == null) {
+    return null;
+  }
+  return normalizeOptionalString(value);
+}
+
+function normalizeOptionalString(value: string | null): string | null {
+  const normalized = String(value ?? "").trim();
+  return normalized ? normalized : null;
 }
 
 function envList(name: string): string[] | null {

@@ -17,8 +17,9 @@
     "authToken": null,
     "threadId": "SET_BY_ASTRAL_BRIDGE_THREAD_ID_ENV",
     "cwd": "/workspace",
+    "modelProvider": null,
     "model": null,
-    "includeImageInputs": true
+    "includeImageInputs": false
   },
   "qq": {
     "botUserId": "SET_BY_ASTRAL_BRIDGE_BOT_QQ_ENV",

@@ -18,7 +18,7 @@
     "threadId": "REPLACE_WITH_FIXED_ASTRAL_THREAD_ID",
     "cwd": null,
     "model": null,
-    "includeImageInputs": true
+    "includeImageInputs": false
   },
   "qq": {
     "botUserId": "REPLACE_WITH_BOT_QQ",

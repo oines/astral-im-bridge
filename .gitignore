@@ -38,4 +38,6 @@ deploy/orbstack/bridge/
 deploy/orbstack/cargo-home/
 deploy/orbstack/napcat/
 deploy/orbstack/workspace/*
+deploy/orbstack/workspace/.bridge-event-api.env
 !deploy/orbstack/workspace/AGENTS.md
+!deploy/orbstack/workspace/BRIDGE_EVENT_API.md
