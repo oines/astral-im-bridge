@@ -11,6 +11,11 @@ interface PendingRequest {
   reject: (error: Error) => void;
 }
 
+export interface InterruptActiveTurnResult {
+  interrupted: boolean;
+  turnId: string | null;
+}
+
 export class AstralAppServerClient extends EventEmitter {
   private socket: WebSocket | null = null;
   private nextId = 1;
@@ -34,6 +39,29 @@ export class AstralAppServerClient extends EventEmitter {
     const task = this.submissionQueue.then(() => this.submitExternalEventNow(event));
     this.submissionQueue = task.catch(() => undefined);
     return task;
+  }
+
+  async interruptActiveTurn(): Promise<InterruptActiveTurnResult> {
+    await this.ensureThread();
+    await this.refreshActiveTurn();
+
+    const turnId = this.activeTurnId;
+    if (!turnId) {
+      return { interrupted: false, turnId: null };
+    }
+
+    await this.request("turn/interrupt", {
+      threadId: this.config.threadId,
+      turnId,
+    });
+    if (this.activeTurnId === turnId) {
+      this.activeTurnId = null;
+    }
+    log("interrupted astral turn", {
+      threadId: this.config.threadId,
+      turnId,
+    });
+    return { interrupted: true, turnId };
   }
 
   status(): Record<string, unknown> {

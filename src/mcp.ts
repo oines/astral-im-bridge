@@ -9,11 +9,12 @@ import type { AstralAppServerClient } from "./astral.js";
 import { dashboardHtml, dashboardState } from "./dashboard.js";
 import { ExternalEventBatcher } from "./event_batcher.js";
 import { registerGroupAdminTools } from "./group_admin_tools.js";
-import { error, log } from "./logger.js";
+import { error, log, warn } from "./logger.js";
 import { ensureAttachmentDownloaded } from "./media.js";
+import { buildOutboundStoredMessage, replySegmentMessageId } from "./message.js";
 import type { OneBotClient } from "./onebot.js";
 import type { MessageStore } from "./store.js";
-import type { BridgeConfig, ExternalEvent, SourceType } from "./types.js";
+import type { BridgeConfig, ExternalEvent, MessageSegment, SourceType } from "./types.js";
 
 const QQ_SEND_DELAY_MIN_MS = 3000;
 const QQ_SEND_DELAY_MAX_MS = 5000;
@@ -50,6 +51,14 @@ interface OutboundSegmentsOptions {
   images: string[];
   parts?: OutboundPart[];
   replyToMessageId?: string;
+}
+
+interface SaveOutboundMessageOptions {
+  sourceType: SourceType;
+  targetId: string;
+  action: string;
+  response: unknown;
+  segments: MessageSegment[];
 }
 
 export async function startMcpServer(
@@ -191,14 +200,22 @@ function createBridgeMcpServer(
       reply_to_message_id: z.string().optional(),
     },
     async (args) => {
+      const message = outboundSegments({
+        message: args.message,
+        images: args.images,
+        parts: args.parts,
+        replyToMessageId: args.reply_to_message_id,
+      });
       const response = await sendQqActionWithDelay(onebot, "send_group_msg", {
         group_id: Number(args.group_id),
-        message: outboundSegments({
-          message: args.message,
-          images: args.images,
-          parts: args.parts,
-          replyToMessageId: args.reply_to_message_id,
-        }),
+        message,
+      });
+      await saveOutboundMessage(config, onebot, store, {
+        sourceType: "group",
+        targetId: args.group_id,
+        action: "send_group_msg",
+        response,
+        segments: message,
       });
       return structured(response);
     },
@@ -215,14 +232,22 @@ function createBridgeMcpServer(
       reply_to_message_id: z.string().optional(),
     },
     async (args) => {
+      const message = outboundSegments({
+        message: args.message,
+        images: args.images,
+        parts: args.parts,
+        replyToMessageId: args.reply_to_message_id,
+      });
       const response = await sendQqActionWithDelay(onebot, "send_private_msg", {
         user_id: Number(args.user_id),
-        message: outboundSegments({
-          message: args.message,
-          images: args.images,
-          parts: args.parts,
-          replyToMessageId: args.reply_to_message_id,
-        }),
+        message,
+      });
+      await saveOutboundMessage(config, onebot, store, {
+        sourceType: "private",
+        targetId: args.user_id,
+        action: "send_private_msg",
+        response,
+        segments: message,
       });
       return structured(response);
     },
@@ -242,6 +267,13 @@ function createBridgeMcpServer(
         file: args.file,
         name: args.name,
       });
+      await saveOutboundMessage(config, onebot, store, {
+        sourceType: "group",
+        targetId: args.group_id,
+        action: "upload_group_file",
+        response,
+        segments: [{ type: "file", data: { file: args.file, name: args.name } }],
+      });
       return structured(response);
     },
   );
@@ -259,6 +291,13 @@ function createBridgeMcpServer(
         user_id: Number(args.user_id),
         file: args.file,
         name: args.name,
+      });
+      await saveOutboundMessage(config, onebot, store, {
+        sourceType: "private",
+        targetId: args.user_id,
+        action: "upload_private_file",
+        response,
+        segments: [{ type: "file", data: { file: args.file, name: args.name } }],
       });
       return structured(response);
     },
@@ -740,7 +779,84 @@ async function sendQqActionWithDelay<T>(
   const delayMs = randomDelayMs(QQ_SEND_DELAY_MIN_MS, QQ_SEND_DELAY_MAX_MS);
   log("delaying qq outbound action", { action, delayMs });
   await sleep(delayMs);
-  return onebot.callAction<T>(action, params);
+  const response = await onebot.callAction<T>(action, params);
+  log("qq outbound action completed", { action, params: summarizeQqActionParams(params) });
+  return response;
+}
+
+async function saveOutboundMessage(
+  config: BridgeConfig,
+  onebot: OneBotClient,
+  store: MessageStore,
+  options: SaveOutboundMessageOptions,
+): Promise<void> {
+  try {
+    const groupInfo = options.sourceType === "group"
+      ? await onebot.getGroupInfo(options.targetId).catch((err) => {
+          warn("failed to fetch group info for outbound history", {
+            groupId: options.targetId,
+            error: String(err),
+          });
+          return null;
+        })
+      : null;
+    const platformMessageId = oneBotResponseMessageId(options.response)
+      ?? syntheticOutboundMessageId(options.sourceType, options.targetId);
+    const stored = buildOutboundStoredMessage({
+      platformMessageId,
+      sourceType: options.sourceType,
+      targetId: options.targetId,
+      groupInfo,
+      botUserId: config.qq.botUserId,
+      segments: options.segments,
+      replyToMessageId: replySegmentMessageId(options.segments),
+      action: options.action,
+      response: options.response,
+    });
+    store.saveMessage(stored);
+    log("stored outbound qq message", {
+      sourceType: options.sourceType,
+      targetId: options.targetId,
+      messageId: platformMessageId,
+      action: options.action,
+    });
+  } catch (err) {
+    error("failed to store outbound qq message", {
+      sourceType: options.sourceType,
+      targetId: options.targetId,
+      action: options.action,
+      error: String(err),
+    });
+  }
+}
+
+function oneBotResponseMessageId(response: unknown): string | null {
+  if (!isPlainObject(response)) {
+    return null;
+  }
+  const direct = firstResponseId(response, ["message_id", "messageId"]);
+  if (direct) {
+    return direct;
+  }
+  const data = response.data;
+  if (isPlainObject(data)) {
+    return firstResponseId(data, ["message_id", "messageId"]);
+  }
+  return null;
+}
+
+function firstResponseId(value: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const id = value[key];
+    if (id != null && String(id).trim()) {
+      return String(id);
+    }
+  }
+  return null;
+}
+
+function syntheticOutboundMessageId(sourceType: SourceType, targetId: string): string {
+  return `outbound:${sourceType}:${targetId}:${randomUUID()}`;
 }
 
 function randomDelayMs(minMs: number, maxMs: number): number {
@@ -753,8 +869,8 @@ async function sleep(delayMs: number): Promise<void> {
   });
 }
 
-function outboundSegments(options: OutboundSegmentsOptions): Array<Record<string, unknown>> {
-  const segments: Array<Record<string, unknown>> = [];
+function outboundSegments(options: OutboundSegmentsOptions): MessageSegment[] {
+  const segments: MessageSegment[] = [];
   if (options.replyToMessageId?.trim()) {
     segments.push({
       type: "reply",
@@ -766,10 +882,9 @@ function outboundSegments(options: OutboundSegmentsOptions): Array<Record<string
     for (const part of options.parts) {
       appendOutboundPart(segments, part);
     }
-    return segments;
   }
 
-  if (options.message.trim()) {
+  if (shouldAppendMessageAfterParts(options)) {
     segments.push({ type: "text", data: { text: options.message } });
   }
   for (const image of options.images) {
@@ -778,7 +893,7 @@ function outboundSegments(options: OutboundSegmentsOptions): Array<Record<string
   return segments;
 }
 
-function appendOutboundPart(segments: Array<Record<string, unknown>>, part: OutboundPart): void {
+function appendOutboundPart(segments: MessageSegment[], part: OutboundPart): void {
   switch (part.type) {
     case "text":
       if (part.text && part.text.length > 0) {
@@ -805,6 +920,64 @@ function oneBotId(value: string): string | number {
     return numeric;
   }
   return trimmed;
+}
+
+function shouldAppendMessageAfterParts(options: OutboundSegmentsOptions): boolean {
+  const message = options.message.trim();
+  if (!message) {
+    return false;
+  }
+  if (!options.parts || options.parts.length === 0) {
+    return true;
+  }
+
+  const textParts = options.parts
+    .filter((part) => part.type === "text" && part.text)
+    .map((part) => part.text ?? "")
+    .join("")
+    .trim();
+  if (!textParts) {
+    return true;
+  }
+
+  const normalizedMessage = normalizeTextForDupCheck(message);
+  const normalizedParts = normalizeTextForDupCheck(textParts);
+  return !normalizedMessage.includes(normalizedParts)
+    && !normalizedParts.includes(normalizedMessage);
+}
+
+function normalizeTextForDupCheck(value: string): string {
+  return value.replace(/\s+/g, "");
+}
+
+function summarizeQqActionParams(params: Record<string, unknown>): Record<string, unknown> {
+  const summary: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params)) {
+    if (key === "message" && Array.isArray(value)) {
+      summary.message = value.map((segment) => summarizeSegment(segment));
+      continue;
+    }
+    summary[key] = value;
+  }
+  return summary;
+}
+
+function summarizeSegment(segment: unknown): unknown {
+  if (!isPlainObject(segment)) {
+    return segment;
+  }
+  if (segment.type !== "text") {
+    return segment;
+  }
+  const data = isPlainObject(segment.data) ? segment.data : {};
+  const text = typeof data.text === "string" ? data.text : "";
+  return {
+    ...segment,
+    data: {
+      ...data,
+      text: text.length > 200 ? `${text.slice(0, 200)}...` : text,
+    },
+  };
 }
 
 function structured(value: unknown): {

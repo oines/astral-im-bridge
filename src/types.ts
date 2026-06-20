@@ -1,5 +1,11 @@
 export type SourceType = "group" | "private";
-export type TriggerKind = "group_mention" | "group_reply" | "group_always" | "private_message" | "none";
+export type TriggerKind =
+  | "group_mention"
+  | "group_reply"
+  | "group_always"
+  | "private_message"
+  | "bot_message"
+  | "none";
 
 export interface BridgeConfig {
   onebot: OneBotConfig;
@@ -78,6 +84,7 @@ export interface OneBotMessageEvent {
   sub_type?: string;
   message_id: number | string;
   user_id: number | string;
+  target_id?: number | string;
   group_id?: number | string;
   self_id?: number | string;
   time?: number;
