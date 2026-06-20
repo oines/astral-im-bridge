@@ -3,6 +3,12 @@ model_provider = "openai"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 
+# Memory phase2 consolidation keeps workspace-write sandbox by default.
+# If this Astral build supports the switch and phase2 cannot run inside an
+# unprivileged Docker/OrbStack container, enable the line below instead of
+# granting SYS_ADMIN/seccomp=unconfined to the container.
+# phase2_sandbox = "danger_full_access"
+
 [mcp_servers.qq]
 url = "http://bridge:6710/mcp"
 

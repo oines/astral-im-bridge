@@ -3,7 +3,7 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { error, log, warn } from "./logger.js";
-import type { GroupInfo, OneBotConfig, OneBotMessageEvent } from "./types.js";
+import type { GroupInfo, OneBotConfig, OneBotMessageEvent, OneBotPokeNoticeEvent } from "./types.js";
 
 interface PendingAction {
   resolve: (value: unknown) => void;
@@ -13,6 +13,7 @@ interface PendingAction {
 
 export interface OneBotEvents {
   message: [OneBotMessageEvent];
+  poke: [OneBotPokeNoticeEvent];
   connected: [];
   disconnected: [];
 }
@@ -191,6 +192,16 @@ export class OneBotClient extends EventEmitter<OneBotEvents> {
       return;
     }
 
+    if (isPokeNoticeEvent(payload)) {
+      log("onebot poke notice received", {
+        groupId: payload.group_id,
+        userId: payload.user_id,
+        targetId: payload.target_id,
+      });
+      this.emit("poke", payload);
+      return;
+    }
+
     if (typeof payload === "object" && payload !== null && "post_type" in payload) {
       const event = payload as Record<string, unknown>;
       log("ignored onebot event", {
@@ -227,6 +238,20 @@ function isMessageEvent(value: unknown): value is OneBotMessageEvent {
     (event.post_type === "message" || event.post_type === "message_sent") &&
     (event.message_type === "group" || event.message_type === "private") &&
     event.message_id != null
+  );
+}
+
+function isPokeNoticeEvent(value: unknown): value is OneBotPokeNoticeEvent {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const event = value as Record<string, unknown>;
+  return (
+    event.post_type === "notice" &&
+    event.notice_type === "notify" &&
+    event.sub_type === "poke" &&
+    event.user_id != null &&
+    event.target_id != null
   );
 }
 

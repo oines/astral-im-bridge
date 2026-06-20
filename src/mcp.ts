@@ -12,7 +12,7 @@ import { ExternalEventBatcher } from "./event_batcher.js";
 import { registerGroupAdminTools } from "./group_admin_tools.js";
 import { error, log, warn } from "./logger.js";
 import { downloadAttachmentFromUrl, ensureAttachmentDownloaded } from "./media.js";
-import { buildOutboundStoredMessage, replySegmentMessageId } from "./message.js";
+import { buildOutboundStoredMessage, replySegmentMessageId, sanitizeCqMessage } from "./message.js";
 import type { OneBotClient } from "./onebot.js";
 import { QQ_REACTION_EMOJI_IDS, TELEGRAM_REACTION_EMOJIS } from "./reactions.js";
 import type { MessageStore } from "./store.js";
@@ -21,7 +21,7 @@ import {
   TelegramClient,
   type TelegramMessage,
 } from "./telegram.js";
-import type { BridgeConfig, ExternalEvent, MessageSegment, SourceType, StoredAttachment } from "./types.js";
+import type { BridgeConfig, ExternalEvent, MessageSegment, SourceType, StoredAttachment, StoredMessage } from "./types.js";
 
 const QQ_SEND_DELAY_MIN_MS = 3000;
 const QQ_SEND_DELAY_MAX_MS = 5000;
@@ -119,12 +119,19 @@ function createBridgeMcpServer(
       limit: z.number().int().min(1).max(100).default(20),
       before_message_id: z.string().optional(),
     },
-    async (args) => structured(store.recentMessages(
-      "qq",
-      args.target_type as SourceType,
-      args.target_id,
-      args.limit,
-      args.before_message_id,
+    async (args) => structured(historyMessagesResponse(
+      store.recentMessages(
+        "qq",
+        args.target_type as SourceType,
+        args.target_id,
+        args.limit,
+        args.before_message_id,
+      ),
+      {
+        platform: "qq",
+        target_type: args.target_type,
+        target_id: args.target_id,
+      },
     )),
   );
 
@@ -136,12 +143,12 @@ function createBridgeMcpServer(
       target_type: z.enum(["group", "private"]).optional(),
       target_id: z.string().optional(),
     },
-    async (args) => structured(store.getMessage(
+    async (args) => structured(compactStoredMessageOrNull(store.getMessage(
       args.message_id,
       "qq",
       args.target_type as SourceType | undefined,
       args.target_id,
-    )),
+    ))),
   );
 
   server.tool(
@@ -152,12 +159,12 @@ function createBridgeMcpServer(
       target_id: z.string(),
       limit: z.number().int().min(1).max(100).default(100),
     },
-    async (args) => structured(store.unreadMessages(
+    async (args) => structured(historyUnreadResponse(store.unreadMessages(
       "qq",
       args.target_type as SourceType,
       args.target_id,
       args.limit,
-    )),
+    ))),
   );
 
   server.tool(
@@ -169,12 +176,20 @@ function createBridgeMcpServer(
       query: z.string(),
       limit: z.number().int().min(1).max(100).default(20),
     },
-    async (args) => structured(store.searchMessages(
-      "qq",
-      args.target_type as SourceType,
-      args.target_id,
-      args.query,
-      args.limit,
+    async (args) => structured(historyMessagesResponse(
+      store.searchMessages(
+        "qq",
+        args.target_type as SourceType,
+        args.target_id,
+        args.query,
+        args.limit,
+      ),
+      {
+        platform: "qq",
+        target_type: args.target_type,
+        target_id: args.target_id,
+        query: args.query,
+      },
     )),
   );
 
@@ -212,7 +227,13 @@ function createBridgeMcpServer(
         throw new Error("attachment not found");
       }
       const filePath = await downloadQqAttachment(store, onebot, attachment);
-      return structured({ path: filePath, attachment });
+      return structured(compactActionResponse({
+        ok: true,
+        platform: "qq",
+        action: "download_media",
+        path: filePath,
+        attachment: compactAttachment(attachment),
+      }));
     },
   );
 
@@ -243,13 +264,15 @@ function createBridgeMcpServer(
         messageId: args.message_id,
         emojiId: args.emoji_id,
       });
-      return structured({
-        ok: true,
+      return structured(compactActionResponse({
+        ok: oneBotActionOk(response),
+        platform: "qq",
+        action: "set_reaction",
         message_id: args.message_id,
         group_id: stored.targetId,
         emoji_id: args.emoji_id,
-        response,
-      });
+        status: oneBotActionStatus(response),
+      }));
     },
   );
 
@@ -281,7 +304,15 @@ function createBridgeMcpServer(
         response,
         segments: message,
       });
-      return structured(response);
+      return structured(qqSendActionResponse(response, {
+        action: "send_group_message",
+        target_type: "group",
+        group_id: args.group_id,
+        message_id: oneBotResponseMessageId(response),
+        reply_to_message_id: args.reply_to_message_id ?? null,
+        text: args.message,
+        parts_count: message.length,
+      }));
     },
   );
 
@@ -313,7 +344,15 @@ function createBridgeMcpServer(
         response,
         segments: message,
       });
-      return structured(response);
+      return structured(qqSendActionResponse(response, {
+        action: "send_private_message",
+        target_type: "private",
+        user_id: args.user_id,
+        message_id: oneBotResponseMessageId(response),
+        reply_to_message_id: args.reply_to_message_id ?? null,
+        text: args.message,
+        parts_count: message.length,
+      }));
     },
   );
 
@@ -338,7 +377,13 @@ function createBridgeMcpServer(
         response,
         segments: [{ type: "file", data: { file: args.file, name: args.name } }],
       });
-      return structured(response);
+      return structured(qqSendActionResponse(response, {
+        action: "send_group_file",
+        target_type: "group",
+        group_id: args.group_id,
+        file: args.file,
+        name: args.name ?? null,
+      }));
     },
   );
 
@@ -363,7 +408,13 @@ function createBridgeMcpServer(
         response,
         segments: [{ type: "file", data: { file: args.file, name: args.name } }],
       });
-      return structured(response);
+      return structured(qqSendActionResponse(response, {
+        action: "send_private_file",
+        target_type: "private",
+        user_id: args.user_id,
+        file: args.file,
+        name: args.name ?? null,
+      }));
     },
   );
 
@@ -499,12 +550,19 @@ function registerTelegramTools(
       limit: z.number().int().min(1).max(100).default(20),
       before_message_id: z.string().optional(),
     },
-    async (args) => structured(store.recentMessages(
-      "telegram",
-      args.target_type as SourceType,
-      args.chat_id,
-      args.limit,
-      args.before_message_id,
+    async (args) => structured(historyMessagesResponse(
+      store.recentMessages(
+        "telegram",
+        args.target_type as SourceType,
+        args.chat_id,
+        args.limit,
+        args.before_message_id,
+      ),
+      {
+        platform: "telegram",
+        target_type: args.target_type,
+        target_id: args.chat_id,
+      },
     )),
   );
 
@@ -516,12 +574,12 @@ function registerTelegramTools(
       chat_id: z.string().optional(),
       target_type: z.enum(["group", "private"]).optional(),
     },
-    async (args) => structured(store.getMessage(
+    async (args) => structured(compactStoredMessageOrNull(store.getMessage(
       args.message_id,
       "telegram",
       args.target_type as SourceType | undefined,
       args.chat_id,
-    )),
+    ))),
   );
 
   server.tool(
@@ -532,12 +590,12 @@ function registerTelegramTools(
       target_type: z.enum(["group", "private"]).default("group"),
       limit: z.number().int().min(1).max(100).default(100),
     },
-    async (args) => structured(store.unreadMessages(
+    async (args) => structured(historyUnreadResponse(store.unreadMessages(
       "telegram",
       args.target_type as SourceType,
       args.chat_id,
       args.limit,
-    )),
+    ))),
   );
 
   server.tool(
@@ -549,12 +607,20 @@ function registerTelegramTools(
       query: z.string(),
       limit: z.number().int().min(1).max(100).default(20),
     },
-    async (args) => structured(store.searchMessages(
-      "telegram",
-      args.target_type as SourceType,
-      args.chat_id,
-      args.query,
-      args.limit,
+    async (args) => structured(historyMessagesResponse(
+      store.searchMessages(
+        "telegram",
+        args.target_type as SourceType,
+        args.chat_id,
+        args.query,
+        args.limit,
+      ),
+      {
+        platform: "telegram",
+        target_type: args.target_type,
+        target_id: args.chat_id,
+        query: args.query,
+      },
     )),
   );
 
@@ -576,7 +642,13 @@ function registerTelegramTools(
         throw new Error("attachment not found");
       }
       const filePath = await telegram.downloadAttachment(store, attachment);
-      return structured({ path: filePath, attachment });
+      return structured(compactActionResponse({
+        ok: true,
+        platform: "telegram",
+        action: "download_media",
+        path: filePath,
+        attachment: compactAttachment(attachment),
+      }));
     },
   );
 
@@ -609,7 +681,18 @@ function registerTelegramTools(
         segments: outbound.segments,
         replyToMessageId: args.reply_to_message_id,
       });
-      return structured(response);
+      return structured(compactActionResponse({
+        ok: true,
+        platform: "telegram",
+        action: "send_message",
+        chat_id: args.chat_id,
+        chat_type: response.chat.type,
+        chat_title: telegramChatTitle(response),
+        message_id: String(response.message_id),
+        message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
+        reply_to_message_id: args.reply_to_message_id ?? null,
+        text: telegramPlainText(outbound.segments),
+      }));
     },
   );
 
@@ -642,7 +725,19 @@ function registerTelegramTools(
         segments,
         replyToMessageId: args.reply_to_message_id,
       });
-      return structured(response);
+      return structured(compactActionResponse({
+        ok: true,
+        platform: "telegram",
+        action: "send_file",
+        chat_id: args.chat_id,
+        chat_type: response.chat.type,
+        chat_title: telegramChatTitle(response),
+        message_id: String(response.message_id),
+        message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
+        reply_to_message_id: args.reply_to_message_id ?? null,
+        file: args.file,
+        caption: args.caption || null,
+      }));
     },
   );
 
@@ -663,7 +758,13 @@ function registerTelegramTools(
         chatId: args.chat_id,
         messageId: args.message_id,
       });
-      return structured({ ok: response });
+      return structured(compactActionResponse({
+        ok: response,
+        platform: "telegram",
+        action: "delete_message",
+        chat_id: args.chat_id,
+        message_id: args.message_id,
+      }));
     },
   );
 
@@ -688,12 +789,14 @@ function registerTelegramTools(
         messageId: args.message_id,
         emoji: args.emoji,
       });
-      return structured({
+      return structured(compactActionResponse({
         ok: response,
+        platform: "telegram",
+        action: "set_reaction",
         chat_id: args.chat_id,
         message_id: args.message_id,
         emoji: args.emoji,
-      });
+      }));
     },
   );
 
@@ -1399,6 +1502,33 @@ function oneBotResponseMessageId(response: unknown): string | null {
   return null;
 }
 
+function oneBotActionOk(response: unknown): boolean {
+  if (!isPlainObject(response)) {
+    return true;
+  }
+  return response.status === "ok" || response.retcode === 0;
+}
+
+function oneBotActionStatus(response: unknown): string | null {
+  if (!isPlainObject(response)) {
+    return null;
+  }
+  const status = response.status ?? response.message ?? response.wording;
+  return status == null ? null : String(status);
+}
+
+function qqSendActionResponse(
+  response: unknown,
+  fields: Record<string, unknown>,
+): Record<string, unknown> {
+  return compactActionResponse({
+    ok: oneBotActionOk(response),
+    platform: "qq",
+    ...fields,
+    status: oneBotActionStatus(response),
+  });
+}
+
 function firstResponseId(value: Record<string, unknown>, keys: string[]): string | null {
   for (const key of keys) {
     const id = value[key];
@@ -1532,6 +1662,153 @@ function summarizeSegment(segment: unknown): unknown {
       text: text.length > 200 ? `${text.slice(0, 200)}...` : text,
     },
   };
+}
+
+function telegramPlainText(segments: MessageSegment[]): string {
+  return segments.map((segment) => {
+    const data = segment.data ?? {};
+    switch (segment.type) {
+      case "text":
+        return String(data.text ?? "");
+      case "mention":
+        return String(data.username ? `@${data.username}` : data.text ?? data.user_id ?? "");
+      case "file":
+        return `[file:${String(data.name ?? data.file ?? "")}]`;
+      default:
+        return `[${segment.type}]`;
+    }
+  }).join("");
+}
+
+function historyMessagesResponse(
+  messages: StoredMessage[],
+  meta: Record<string, unknown>,
+): Record<string, unknown> {
+  const compactMessages = messages.map(compactStoredMessage);
+  return {
+    ...meta,
+    returned_count: compactMessages.length,
+    reply_messages: replyMessageSummaries(compactMessages),
+    messages: compactMessages,
+  };
+}
+
+function historyUnreadResponse(value: Record<string, unknown>): Record<string, unknown> {
+  const messages = Array.isArray(value.messages)
+    ? value.messages.filter(isStoredMessage).map(compactStoredMessage)
+    : [];
+  return {
+    ...value,
+    reply_messages: replyMessageSummaries(messages),
+    messages,
+  };
+}
+
+function compactStoredMessageOrNull(message: StoredMessage | null): Record<string, unknown> | null {
+  return message ? compactStoredMessage(message) : null;
+}
+
+function compactStoredMessage(message: StoredMessage): Record<string, unknown> {
+  return {
+    id: message.id,
+    platform: message.platform,
+    message_id: message.platformMessageId,
+    source_type: message.sourceType,
+    target_id: message.targetId,
+    group_id: message.groupId,
+    group_name: message.groupName,
+    sender_user_id: message.userId,
+    sender_nickname: message.nickname,
+    sender_group_card: message.groupCard,
+    sender_role: message.role,
+    sender_display_name: displayName(message),
+    time_unix: message.time,
+    text: message.text,
+    raw_message: truncateText(sanitizeCqMessage(message.rawMessage), 500),
+    trigger: message.trigger,
+    reply_to_message_id: message.replyToMessageId,
+    reply_to_message: message.replyToMessage
+      ? {
+          id: message.replyToMessage.id,
+          message_id: message.replyToMessage.platformMessageId,
+          source_type: message.replyToMessage.sourceType,
+          target_id: message.replyToMessage.targetId,
+          sender_user_id: message.replyToMessage.userId,
+          sender_nickname: message.replyToMessage.nickname,
+          sender_group_card: message.replyToMessage.groupCard,
+          sender_role: message.replyToMessage.role,
+          sender_display_name: displayName(message.replyToMessage),
+          time_unix: message.replyToMessage.time,
+          text: message.replyToMessage.text,
+          raw_message: truncateText(sanitizeCqMessage(message.replyToMessage.rawMessage), 500),
+          trigger: message.replyToMessage.trigger,
+        }
+      : null,
+    attachments: message.attachments.map(compactAttachment),
+  };
+}
+
+function replyMessageSummaries(messages: Record<string, unknown>[]): Record<string, unknown>[] {
+  return messages
+    .filter((message) => message.reply_to_message_id)
+    .map((message) => {
+      const reply = isPlainObject(message.reply_to_message) ? message.reply_to_message : null;
+      return {
+        message_id: message.message_id,
+        sender_display_name: message.sender_display_name,
+        text: message.text,
+        reply_to_message_id: message.reply_to_message_id,
+        reply_to_sender_display_name: reply?.sender_display_name ?? null,
+        reply_to_text: reply?.text ?? null,
+      };
+    });
+}
+
+function displayName(message: Pick<StoredMessage, "groupCard" | "nickname" | "userId">): string {
+  return message.groupCard || message.nickname || message.userId;
+}
+
+function truncateText(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
+}
+
+function compactAttachment(attachment: StoredAttachment): Record<string, unknown> {
+  return compactActionResponse({
+    attachment_id: attachment.id,
+    kind: attachment.kind,
+    file_id: attachment.fileId,
+    name: attachment.name,
+    mime_type: attachment.mimeType,
+    size: attachment.size,
+    path: attachment.path,
+    downloaded: Boolean(attachment.path),
+    has_remote_url: Boolean(attachment.url),
+  });
+}
+
+function compactActionResponse(fields: Record<string, unknown>): Record<string, unknown> {
+  const response: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (value == null) {
+      continue;
+    }
+    if (typeof value === "string") {
+      response[key] = truncateText(value, key === "text" || key === "caption" ? 500 : 1000);
+      continue;
+    }
+    response[key] = value;
+  }
+  return response;
+}
+
+function isStoredMessage(value: unknown): value is StoredMessage {
+  return isPlainObject(value)
+    && typeof value.platformMessageId === "string"
+    && typeof value.platform === "string"
+    && typeof value.sourceType === "string"
+    && typeof value.targetId === "string"
+    && typeof value.userId === "string"
+    && typeof value.time === "number";
 }
 
 function structured(value: unknown): {

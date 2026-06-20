@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import type {
   ExternalEvent,
   GroupInfo,
   MessageSegment,
   OneBotMessageEvent,
+  OneBotPokeNoticeEvent,
   Platform,
   SourceType,
   StoredAttachment,
@@ -39,6 +41,14 @@ export function targetIdFromEvent(event: OneBotMessageEvent): string {
   return String(event.target_id ?? event.user_id);
 }
 
+export function pokeSourceType(event: OneBotPokeNoticeEvent): SourceType {
+  return event.group_id == null ? "private" : "group";
+}
+
+export function pokeTargetId(event: OneBotPokeNoticeEvent): string {
+  return event.group_id == null ? String(event.user_id) : String(event.group_id);
+}
+
 export function textFromSegments(segments: MessageSegment[]): string {
   return segments
     .filter((segment) => segment.type === "text")
@@ -48,7 +58,34 @@ export function textFromSegments(segments: MessageSegment[]): string {
 }
 
 export function rawText(event: OneBotMessageEvent, segments: MessageSegment[]): string {
-  return event.raw_message ?? textFromSegments(segments);
+  return sanitizeCqMessage(event.raw_message ?? historyTextFromSegments(segments));
+}
+
+export function sanitizeCqMessage(rawMessage: string): string {
+  return rawMessage.replace(/\[CQ:([a-zA-Z0-9_]+)(?:,([^\]]*))?\]/g, (match, type: string, body?: string) => {
+    if (!body) {
+      return match;
+    }
+    const params = body
+      .split(",")
+      .map((part) => sanitizeCqParam(part))
+      .filter((part): part is string => part != null && part.length > 0);
+    return params.length > 0 ? `[CQ:${type},${params.join(",")}]` : `[CQ:${type}]`;
+  });
+}
+
+function sanitizeCqParam(param: string): string | null {
+  const equalsIndex = param.indexOf("=");
+  const key = (equalsIndex >= 0 ? param.slice(0, equalsIndex) : param).trim();
+  const value = equalsIndex >= 0 ? param.slice(equalsIndex + 1) : "";
+  const normalizedKey = key.toLowerCase();
+  if (["url", "file_url", "thumb_url", "preview"].includes(normalizedKey)) {
+    return null;
+  }
+  if (["file", "id", "name"].includes(normalizedKey) && /^https?:\/\//i.test(value)) {
+    return `${key}=remote`;
+  }
+  return param;
 }
 
 export function historyTextFromSegments(segments: MessageSegment[]): string {
@@ -63,14 +100,19 @@ export function historyTextFromSegments(segments: MessageSegment[]): string {
         case "reply":
           return `[CQ:reply,id=${String(data.id ?? data.message_id ?? "")}]`;
         case "image":
-          return `[CQ:image,file=${String(data.file ?? data.url ?? "")}]`;
+          return `[CQ:image,file=${safeMediaLabel(data.file ?? data.id)}]`;
         case "file":
-          return `[CQ:file,file=${String(data.file ?? data.name ?? "")}]`;
+          return `[CQ:file,file=${safeMediaLabel(data.file ?? data.name)}]`;
         default:
           return `[${segment.type}]`;
       }
     })
     .join("");
+}
+
+function safeMediaLabel(value: unknown): string {
+  const label = String(value ?? "").trim();
+  return /^https?:\/\//i.test(label) ? "remote" : label;
 }
 
 export function isAtBot(segments: MessageSegment[], botUserId: string): boolean {
@@ -86,6 +128,88 @@ export function replySegmentMessageId(segments: MessageSegment[]): string | null
   const reply = segments.find((segment) => segment.type === "reply");
   const id = reply?.data?.id ?? reply?.data?.message_id;
   return id == null ? null : String(id);
+}
+
+export function replyMessageIdFromEvent(
+  event: OneBotMessageEvent,
+  segments = normalizeSegments(event.message),
+): string | null {
+  return replySegmentMessageId(segments)
+    ?? replyMessageIdFromRaw(event.raw_message)
+    ?? replyMessageIdFromRaw(typeof event.message === "string" ? event.message : null)
+    ?? replyMessageIdFromExtensionFields(event);
+}
+
+function replyMessageIdFromRaw(rawMessage: string | null | undefined): string | null {
+  if (!rawMessage) {
+    return null;
+  }
+  const match = rawMessage.match(/\[CQ:reply,(?:[^\]]*,)?(?:id|message_id)=([^,\]]+)/i);
+  return normalizeReplyId(match?.[1]);
+}
+
+function replyMessageIdFromExtensionFields(event: OneBotMessageEvent): string | null {
+  const direct = firstReplyId(event, [
+    "reply_to_message_id",
+    "replyToMessageId",
+    "reply_message_id",
+    "replyMessageId",
+    "source_message_id",
+    "sourceMessageId",
+    "quoted_message_id",
+    "quotedMessageId",
+  ]);
+  if (direct) {
+    return direct;
+  }
+
+  for (const key of [
+    "reply",
+    "reply_message",
+    "replyMessage",
+    "quote",
+    "quoted",
+    "source",
+    "source_message",
+    "sourceMessage",
+  ]) {
+    const nested = event[key];
+    if (typeof nested !== "object" || nested === null) {
+      continue;
+    }
+    const id = firstReplyId(nested as Record<string, unknown>, [
+      "id",
+      "message_id",
+      "messageId",
+      "reply_to_message_id",
+      "replyToMessageId",
+      "source_message_id",
+      "sourceMessageId",
+    ]);
+    if (id) {
+      return id;
+    }
+  }
+
+  return null;
+}
+
+function firstReplyId(source: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const id = normalizeReplyId(source[key]);
+    if (id) {
+      return id;
+    }
+  }
+  return null;
+}
+
+function normalizeReplyId(value: unknown): string | null {
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "bigint") {
+    return null;
+  }
+  const id = String(value).trim();
+  return id.length > 0 ? id : null;
 }
 
 export function attachmentsFromSegments(segments: MessageSegment[]): StoredAttachment[] {
@@ -145,6 +269,69 @@ export function buildStoredMessage(
   };
 }
 
+export function buildPokeStoredMessage(
+  event: OneBotPokeNoticeEvent,
+  groupInfo: GroupInfo | null,
+  trigger: Extract<TriggerKind, "group_poke" | "private_poke">,
+): StoredMessage {
+  const sourceType = pokeSourceType(event);
+  const targetId = pokeTargetId(event);
+  const groupId = event.group_id == null ? null : String(event.group_id);
+  const userId = String(event.user_id);
+  const targetUserId = String(event.target_id);
+  const time = event.time ?? Math.floor(Date.now() / 1000);
+  const sender = event.sender ?? {};
+  const text = sourceType === "group"
+    ? `[poke] user ${userId} poked bot in group ${targetId}`
+    : `[poke] user ${userId} poked bot in private chat`;
+
+  return {
+    platform: "qq",
+    platformMessageId: pokePlatformMessageId(event, sourceType, targetId),
+    sourceType,
+    targetId,
+    groupId,
+    groupName: groupInfo?.group_name ?? null,
+    userId,
+    nickname: nullIfEmpty(sender.nickname),
+    groupCard: nullIfEmpty(sender.card),
+    role: nullIfEmpty(sender.role),
+    time,
+    text,
+    rawMessage: text,
+    trigger,
+    replyToMessageId: null,
+    rawEvent: {
+      ...event,
+      bridge_event_type: "poke",
+      bridge_synthetic_message_id: true,
+      poke_target_user_id: targetUserId,
+    },
+    attachments: [],
+  };
+}
+
+function pokePlatformMessageId(
+  event: OneBotPokeNoticeEvent,
+  sourceType: SourceType,
+  targetId: string,
+): string {
+  const eventRecord = event as Record<string, unknown>;
+  const explicitId = firstString(eventRecord, ["message_id", "messageId", "event_id", "eventId"]);
+  if (explicitId) {
+    return explicitId;
+  }
+  return [
+    "poke",
+    sourceType,
+    targetId,
+    String(event.user_id),
+    String(event.target_id),
+    String(event.time ?? Math.floor(Date.now() / 1000)),
+    randomUUID(),
+  ].join(":");
+}
+
 export function buildOutboundStoredMessage(options: OutboundStoredMessageOptions): StoredMessage {
   const groupId = options.sourceType === "group" ? options.targetId : null;
   const rawMessage = historyTextFromSegments(options.segments);
@@ -198,6 +385,7 @@ export function buildAstralPrompt(message: StoredMessage): string {
 }
 
 function buildQqAstralPrompt(message: StoredMessage): string {
+  const isPoke = isQqPokeMessage(message);
   const lines = [
     "[QQ inbound message]",
     `platform: onebot_v11 / napcat`,
@@ -216,6 +404,10 @@ function buildQqAstralPrompt(message: StoredMessage): string {
   lines.push(`message_id: ${message.platformMessageId}`);
   lines.push(`time_unix: ${message.time}`);
   lines.push(`trigger: ${message.trigger}`);
+  if (isPoke) {
+    lines.push("event_type: poke");
+    lines.push("message_id_is_synthetic: true");
+  }
   if (message.replyToMessageId) {
     lines.push(`reply_to_message_id: ${message.replyToMessageId}`);
   }
@@ -237,12 +429,12 @@ function buildQqAstralPrompt(message: StoredMessage): string {
     lines.push("");
     lines.push("attachments:");
     for (const [index, attachment] of message.attachments.entries()) {
-      const label = attachment.name ?? attachment.fileId ?? attachment.url ?? "unnamed";
+      const label = attachment.name ?? attachment.fileId ?? (attachment.url ? "remote_media" : "unnamed");
       lines.push(`- index: ${index}`);
       lines.push(`  kind: ${attachment.kind}`);
       lines.push(`  label: ${label}`);
       if (attachment.url) {
-        lines.push(`  url: ${attachment.url}`);
+        lines.push("  has_remote_url: true");
       }
       if (attachment.fileId) {
         lines.push(`  file_id: ${attachment.fileId}`);
@@ -260,6 +452,11 @@ function buildQqAstralPrompt(message: StoredMessage): string {
   lines.push(
     "Normally reply to this QQ message by calling a QQ MCP send tool in the same channel it came from. Do not only output plain text: plain text is not sent to QQ, so the sender will not see it. For group messages call mcp__qq__qq_send_group_message with group_id; for private messages call mcp__qq__qq_send_private_message with sender_user_id.",
   );
+  if (isPoke) {
+    lines.push(
+      "This poke event does not have a real QQ message id. Do not use this synthetic message_id as reply_to_message_id; if responding, send a normal message to the same group/private chat unless you choose a real message id from history.",
+    );
+  }
   lines.push(
     "To send an image, create or reuse an image file under /workspace or /app/media, then call mcp__qq__qq_send_group_message or mcp__qq__qq_send_private_message with images: [\"/workspace/example.png\"] and optional message text. Do not just print the image path or a Markdown image; QQ users will not receive it.",
   );
@@ -283,6 +480,17 @@ function buildQqAstralPrompt(message: StoredMessage): string {
   );
 
   return lines.join("\n");
+}
+
+function isQqPokeMessage(message: StoredMessage): boolean {
+  if (message.platform !== "qq") {
+    return false;
+  }
+  if (message.trigger !== "group_poke" && message.trigger !== "private_poke") {
+    return false;
+  }
+  const raw = isRecord(message.rawEvent) ? message.rawEvent : {};
+  return raw.bridge_event_type === "poke" || raw.sub_type === "poke";
 }
 
 function buildTelegramAstralPrompt(message: StoredMessage): string {
@@ -335,7 +543,7 @@ function buildTelegramAstralPrompt(message: StoredMessage): string {
     lines.push("");
     lines.push("attachments:");
     for (const [index, attachment] of message.attachments.entries()) {
-      const label = attachment.name ?? attachment.fileId ?? attachment.url ?? "unnamed";
+      const label = attachment.name ?? attachment.fileId ?? (attachment.url ? "remote_media" : "unnamed");
       lines.push(`- index: ${index}`);
       lines.push(`  kind: ${attachment.kind}`);
       lines.push(`  label: ${label}`);

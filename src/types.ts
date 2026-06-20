@@ -4,8 +4,10 @@ export type TriggerKind =
   | "group_mention"
   | "group_reply"
   | "group_always"
+  | "group_poke"
   | "keyword"
   | "private_message"
+  | "private_poke"
   | "bot_message"
   | "none";
 
@@ -52,6 +54,7 @@ export interface AstralConfig {
   authToken: string | null;
   threadId: string;
   cwd: string | null;
+  modelProvider: string | null;
   model: string | null;
   includeImageInputs: boolean;
 }
@@ -111,6 +114,19 @@ export interface OneBotMessageEvent {
   [key: string]: unknown;
 }
 
+export interface OneBotPokeNoticeEvent {
+  post_type: "notice";
+  notice_type: "notify";
+  sub_type: "poke";
+  user_id: number | string;
+  target_id: number | string;
+  group_id?: number | string;
+  self_id?: number | string;
+  time?: number;
+  sender?: OneBotSender;
+  [key: string]: unknown;
+}
+
 export interface GroupInfo {
   group_id: string;
   group_name: string | null;
@@ -147,9 +163,25 @@ export interface StoredMessage {
   rawMessage: string;
   trigger: TriggerKind;
   replyToMessageId: string | null;
+  replyToMessage?: StoredMessageReplyPreview | null;
   rawEvent: unknown;
   attachments: StoredAttachment[];
   conversationUnread?: ConversationUnread;
+}
+
+export interface StoredMessageReplyPreview {
+  id: number;
+  platformMessageId: string;
+  sourceType: SourceType;
+  targetId: string;
+  userId: string;
+  nickname: string | null;
+  groupCard: string | null;
+  role: string | null;
+  time: number;
+  text: string;
+  rawMessage: string;
+  trigger: TriggerKind;
 }
 
 export interface ConversationUnread {

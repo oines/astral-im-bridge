@@ -95,7 +95,7 @@ export function registerGroupAdminTools(
     async (args) => {
       assertAllowedGroup(config, args.group_id);
       const response = await runMemberAction(onebot, args);
-      return structured(response);
+      return structured(groupAdminResponse(args.action, args, response));
     },
   );
 
@@ -115,7 +115,7 @@ export function registerGroupAdminTools(
         assertAllowedGroup(config, args.group_id);
       }
       const response = await runRequestAction(onebot, args);
-      return structured(response);
+      return structured(groupAdminResponse(args.action, args, response));
     },
   );
 
@@ -134,7 +134,7 @@ export function registerGroupAdminTools(
     async (args) => {
       assertAllowedGroup(config, args.group_id);
       const response = await runSettingsAction(onebot, args);
-      return structured(response);
+      return structured(groupAdminResponse(args.action, args, response));
     },
   );
 
@@ -151,7 +151,7 @@ export function registerGroupAdminTools(
     async (args) => {
       assertAllowedGroup(config, args.group_id);
       const response = await runMessageAction(onebot, args);
-      return structured(response);
+      return structured(groupAdminResponse(args.action, args, response));
     },
   );
 
@@ -170,7 +170,7 @@ export function registerGroupAdminTools(
     async (args) => {
       assertAllowedGroup(config, args.group_id);
       const response = await runNoticeAction(onebot, args);
-      return structured(response);
+      return structured(groupAdminResponse(args.action, args, response));
     },
   );
 
@@ -193,7 +193,7 @@ export function registerGroupAdminTools(
     async (args) => {
       assertAllowedGroup(config, args.group_id);
       const response = await runFileAction(onebot, args);
-      return structured(response);
+      return structured(groupAdminResponse(args.action, args, response));
     },
   );
 
@@ -213,7 +213,7 @@ export function registerGroupAdminTools(
         assertAllowedGroup(config, args.group_id);
       }
       const response = await runInfoAction(onebot, args);
-      return structured(response);
+      return structured(groupAdminResponse(args.action, args, response));
     },
   );
 }
@@ -687,6 +687,81 @@ function oneBotId(value: string): string | number {
     return numeric;
   }
   return trimmed;
+}
+
+function groupAdminResponse(
+  action: string,
+  args: {
+    group_id?: string;
+    user_id?: string;
+    message_id?: string;
+    file_id?: string;
+    folder_id?: string;
+    notice_id?: string;
+    flag?: string;
+  },
+  response: unknown,
+): Record<string, unknown> {
+  const data = oneBotResponseData(response);
+  return compactObject({
+    ok: oneBotActionOk(response),
+    platform: "qq",
+    action,
+    group_id: args.group_id ?? null,
+    user_id: args.user_id ?? null,
+    message_id: args.message_id ?? null,
+    file_id: args.file_id ?? null,
+    folder_id: args.folder_id ?? null,
+    notice_id: args.notice_id ?? null,
+    flag: args.flag ?? null,
+    status: oneBotActionStatus(response),
+    retcode: oneBotActionRetcode(response),
+    data,
+  });
+}
+
+function oneBotActionOk(response: unknown): boolean {
+  if (!isPlainObject(response)) {
+    return true;
+  }
+  return response.status === "ok" || response.retcode === 0;
+}
+
+function oneBotActionStatus(response: unknown): string | null {
+  if (!isPlainObject(response)) {
+    return null;
+  }
+  const status = response.status ?? response.message ?? response.wording;
+  return status == null ? null : String(status);
+}
+
+function oneBotActionRetcode(response: unknown): number | string | null {
+  if (!isPlainObject(response)) {
+    return null;
+  }
+  const retcode = response.retcode;
+  if (typeof retcode === "number" || typeof retcode === "string") {
+    return retcode;
+  }
+  return null;
+}
+
+function oneBotResponseData(response: unknown): unknown {
+  if (!isPlainObject(response) || !("data" in response)) {
+    return null;
+  }
+  return response.data ?? null;
+}
+
+function compactObject(fields: Record<string, unknown>): Record<string, unknown> {
+  const response: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (value == null) {
+      continue;
+    }
+    response[key] = value;
+  }
+  return response;
 }
 
 function structured(value: unknown): {

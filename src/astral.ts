@@ -24,6 +24,7 @@ export class AstralAppServerClient extends EventEmitter {
   private submissionQueue: Promise<void> = Promise.resolve();
   private resumed = false;
   private activeTurnId: string | null = null;
+  private modelSettingsSynced = false;
 
   constructor(private readonly config: AstralConfig) {
     super();
@@ -71,6 +72,9 @@ export class AstralAppServerClient extends EventEmitter {
       activeTurnId: this.activeTurnId,
       pendingRequests: this.pending.size,
       threadId: this.config.threadId,
+      modelProvider: this.config.modelProvider,
+      model: this.config.model,
+      modelSettingsSynced: this.modelSettingsSynced,
     };
   }
 
@@ -120,7 +124,7 @@ export class AstralAppServerClient extends EventEmitter {
       approvalPolicy: "never",
       sandboxPolicy: { type: "dangerFullAccess" },
       ...(this.config.cwd ? { cwd: this.config.cwd } : {}),
-      ...(this.config.model ? { model: this.config.model } : {}),
+      ...this.modelSettingsParams(),
     });
     this.activeTurnId = response.turn?.id ?? null;
     log("started astral turn", {
@@ -149,10 +153,12 @@ export class AstralAppServerClient extends EventEmitter {
         error: String(err),
       });
       this.resumed = true;
+      this.modelSettingsSynced = !this.hasModelSettings();
       return;
     }
     this.resumed = true;
     await this.refreshActiveTurn();
+    await this.syncThreadModelSettings();
   }
 
   private async refreshActiveTurn(): Promise<void> {
@@ -199,6 +205,40 @@ export class AstralAppServerClient extends EventEmitter {
     return input;
   }
 
+  private modelSettingsParams(): Record<string, string> {
+    const params: Record<string, string> = {};
+    if (this.config.modelProvider) {
+      params.modelProvider = this.config.modelProvider;
+    }
+    if (this.config.model) {
+      params.model = this.config.model;
+    }
+    return params;
+  }
+
+  private hasModelSettings(): boolean {
+    return Boolean(this.config.modelProvider || this.config.model);
+  }
+
+  private async syncThreadModelSettings(): Promise<void> {
+    if (this.modelSettingsSynced || !this.hasModelSettings()) {
+      this.modelSettingsSynced = this.modelSettingsSynced || !this.hasModelSettings();
+      return;
+    }
+
+    const modelSettings = this.modelSettingsParams();
+    await this.request("thread/settings/update", {
+      threadId: this.config.threadId,
+      ...modelSettings,
+    });
+    this.modelSettingsSynced = true;
+    this.activeTurnId = null;
+    log("synced astral thread model settings", {
+      threadId: this.config.threadId,
+      ...modelSettings,
+    });
+  }
+
   private async ensureConnected(): Promise<void> {
     if (this.socket?.readyState === WebSocket.OPEN) {
       return;
@@ -223,6 +263,7 @@ export class AstralAppServerClient extends EventEmitter {
       this.socket = null;
       this.resumed = false;
       this.activeTurnId = null;
+      this.modelSettingsSynced = false;
       for (const pending of this.pending.values()) {
         pending.reject(new Error("Astral app-server websocket closed"));
       }

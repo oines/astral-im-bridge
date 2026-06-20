@@ -7,6 +7,7 @@ import type {
   SourceType,
   StoredAttachment,
   StoredMessage,
+  StoredMessageReplyPreview,
   StoredMessageRow,
   StorageConfig,
 } from "./types.js";
@@ -342,8 +343,40 @@ export class MessageStore {
       rawMessage: row.raw_message,
       trigger: row.trigger,
       replyToMessageId: row.reply_to_message_id,
+      replyToMessage: this.replyPreview(row),
       rawEvent: JSON.parse(row.raw_event_json),
       attachments: attachments.map(attachmentFromRow),
+    };
+  }
+
+  private replyPreview(row: StoredMessageRow): StoredMessageReplyPreview | null {
+    if (!row.reply_to_message_id) {
+      return null;
+    }
+    const reply = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE platform = ? AND source_type = ? AND target_id = ? AND platform_message_id = ?
+         ORDER BY time DESC, id DESC
+         LIMIT 1`,
+      )
+      .get(row.platform, row.source_type, row.target_id, row.reply_to_message_id) as StoredMessageRow | undefined;
+    if (!reply) {
+      return null;
+    }
+    return {
+      id: reply.id,
+      platformMessageId: reply.platform_message_id,
+      sourceType: reply.source_type,
+      targetId: reply.target_id,
+      userId: reply.user_id,
+      nickname: reply.nickname,
+      groupCard: reply.group_card,
+      role: reply.role,
+      time: reply.time,
+      text: reply.text,
+      rawMessage: reply.raw_message,
+      trigger: reply.trigger,
     };
   }
 
