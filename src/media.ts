@@ -15,7 +15,20 @@ export async function ensureAttachmentDownloaded(
     throw new Error("attachment has no downloadable URL");
   }
 
-  const response = await fetch(attachment.url);
+  return downloadAttachmentFromUrl(store, attachment, attachment.url);
+}
+
+export async function downloadAttachmentFromUrl(
+  store: MessageStore,
+  attachment: StoredAttachment,
+  url: string,
+  headers?: Record<string, string>,
+): Promise<string> {
+  if (attachment.path && fs.existsSync(attachment.path)) {
+    return attachment.path;
+  }
+
+  const response = await fetch(url, { headers });
   if (!response.ok) {
     throw new Error(`failed to download media: HTTP ${response.status}`);
   }

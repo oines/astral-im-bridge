@@ -237,6 +237,7 @@ endpoint under both `qq` and `telegram` gives the agent natural tool names such 
 | `qq_search_messages` | Search stored text messages in one conversation. |
 | `qq_get_conversation_state` | Return bridge state and counts for one conversation. |
 | `qq_download_media` | Download a stored image/file attachment into the local media cache. |
+| `qq_set_reaction` | React to a stored QQ group message by OneBot `message_id` and QQ `emoji_id`. QQ reactions only work in group chats; the tool description lists common `emoji_id` values. |
 | `qq_group_admin_help` | Explain grouped QQ administration tools and actions. |
 | `qq_group_member_admin` | Kick, mute/unmute, set admin, set card, set special title, or list muted members. |
 | `qq_group_request_admin` | Read or handle group join/invite requests. |
@@ -251,6 +252,7 @@ endpoint under both `qq` and `telegram` gives the agent natural tool names such 
 | `telegram_send_message` | Send text with ordered text/mention parts, optional reply target, and optional topic thread id. |
 | `telegram_send_file` | Send a local path, Telegram `file_id`, or HTTP URL as a document/file. Images intentionally use this tool too. |
 | `telegram_delete_message` | Delete/recall a message when Telegram permissions allow it. Requires `confirm:true`. |
+| `telegram_set_reaction` | React to a Telegram group or private message with one standard reaction emoji; the tool description lists the allowed emoji values. |
 | `telegram_get_unread_messages` | Return the unread batch counted by the latest inbound Astral prompt. |
 | `telegram_get_recent_messages` | Return recent stored messages for one Telegram chat. |
 | `telegram_get_message` | Return one stored Telegram message by `message_id`. |
