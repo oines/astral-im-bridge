@@ -5,6 +5,7 @@ import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 import { log, warn } from "./logger.js";
+import { writeMediaFile } from "./media.js";
 import type {
   MessageSegment,
   SourceType,
@@ -24,6 +25,13 @@ export interface TelegramUser {
   language_code?: string;
 }
 
+export interface TelegramChatPhoto {
+  small_file_id: string;
+  small_file_unique_id?: string;
+  big_file_id: string;
+  big_file_unique_id?: string;
+}
+
 export interface TelegramChat {
   id: number;
   type: "private" | "group" | "supergroup" | "channel";
@@ -31,6 +39,7 @@ export interface TelegramChat {
   username?: string;
   first_name?: string;
   last_name?: string;
+  photo?: TelegramChatPhoto;
 }
 
 export interface TelegramMessageEntity {
@@ -99,6 +108,11 @@ interface TelegramFile {
   file_unique_id?: string;
   file_size?: number;
   file_path?: string;
+}
+
+interface TelegramUserProfilePhotos {
+  total_count: number;
+  photos: TelegramPhotoSize[][];
 }
 
 type TelegramAgent = http.Agent | https.Agent;
@@ -259,6 +273,79 @@ export class TelegramClient extends EventEmitter<TelegramEvents> {
       store.updateAttachmentPath(attachment.id, filePath);
     }
     return filePath;
+  }
+
+  async downloadUserAvatar(store: MessageStore, userId: string, photoIndex = 0): Promise<{
+    path: string;
+    mimeType: string;
+    size: number;
+  }> {
+    if (photoIndex === 0) {
+      const chat = await this.api<TelegramChat>("getChat", {
+        chat_id: telegramId(userId),
+      }).catch((err) => {
+        warn("telegram getChat for user avatar failed; falling back to profile photos", {
+          userId,
+          error: String(err),
+        });
+        return null;
+      });
+      if (chat?.photo?.big_file_id || chat?.photo?.small_file_id) {
+        return this.downloadTelegramFileToMedia(
+          store,
+          chat.photo.big_file_id || chat.photo.small_file_id,
+          `telegram-user-avatar-${safeTelegramMediaId(userId)}`,
+          "avatar",
+        );
+      }
+    }
+
+    const photos = await this.api<TelegramUserProfilePhotos>("getUserProfilePhotos", {
+      user_id: telegramId(userId),
+      offset: photoIndex,
+      limit: 1,
+    });
+    const sizes = photos.photos[0];
+    if (!sizes || sizes.length === 0) {
+      throw new Error("telegram user has no visible profile photo");
+    }
+
+    const photo = [...sizes].sort((a, b) => {
+      const aPixels = a.width * a.height;
+      const bPixels = b.width * b.height;
+      return bPixels - aPixels;
+    })[0];
+    return this.downloadTelegramFileToMedia(
+      store,
+      photo.file_id,
+      `telegram-user-avatar-${safeTelegramMediaId(userId)}`,
+      "avatar",
+    );
+  }
+
+  private async downloadTelegramFileToMedia(
+    store: MessageStore,
+    fileId: string,
+    filenameBase: string,
+    kind: string,
+  ): Promise<{ path: string; mimeType: string; size: number }> {
+    const file = await this.api<TelegramFile>("getFile", { file_id: fileId });
+    if (!file.file_path) {
+      throw new Error("telegram getFile response did not include file_path");
+    }
+    const response = await fetch(`${this.config.apiBaseUrl}/file/bot${this.config.botToken}/${file.file_path}`);
+    if (!response.ok) {
+      throw new Error(`failed to download telegram ${kind}: HTTP ${response.status}`);
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const extension = path.extname(file.file_path) || ".jpg";
+    const filePath = writeMediaFile(store, `${filenameBase}${extension}`, buffer);
+    return {
+      path: filePath,
+      mimeType: mimeTypeForExtension(extension),
+      size: buffer.byteLength,
+    };
   }
 
   private async pollLoop(): Promise<void> {
@@ -658,6 +745,25 @@ function extensionForTelegramAttachment(attachment: StoredAttachment, filePath: 
     return ".png";
   }
   return "";
+}
+
+function mimeTypeForExtension(extension: string): string {
+  switch (extension.toLowerCase()) {
+    case ".png":
+      return "image/png";
+    case ".webp":
+      return "image/webp";
+    case ".gif":
+      return "image/gif";
+    case ".jpg":
+    case ".jpeg":
+    default:
+      return "image/jpeg";
+  }
+}
+
+function safeTelegramMediaId(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]/g, "_");
 }
 
 function sleep(delayMs: number): Promise<void> {

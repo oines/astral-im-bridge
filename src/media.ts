@@ -62,3 +62,14 @@ function extensionFor(attachment: StoredAttachment): string {
   }
   return "";
 }
+
+export function writeMediaFile(
+  store: MessageStore,
+  filename: string,
+  buffer: Buffer,
+): string {
+  const filePath = store.mediaPath(filename);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, buffer);
+  return filePath;
+}

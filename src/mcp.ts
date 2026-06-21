@@ -11,7 +11,7 @@ import { dashboardHtml, dashboardState } from "./dashboard.js";
 import { ExternalEventBatcher } from "./event_batcher.js";
 import { registerGroupAdminTools } from "./group_admin_tools.js";
 import { error, log, warn } from "./logger.js";
-import { downloadAttachmentFromUrl, ensureAttachmentDownloaded } from "./media.js";
+import { downloadAttachmentFromUrl, ensureAttachmentDownloaded, writeMediaFile } from "./media.js";
 import { buildOutboundStoredMessage, replySegmentMessageId, sanitizeCqMessage } from "./message.js";
 import type { OneBotClient } from "./onebot.js";
 import { QQ_REACTION_EMOJI_IDS, TELEGRAM_REACTION_EMOJIS } from "./reactions.js";
@@ -233,6 +233,27 @@ function createBridgeMcpServer(
         action: "download_media",
         path: filePath,
         attachment: compactAttachment(attachment),
+      }));
+    },
+  );
+
+  server.tool(
+    "qq_download_user_avatar",
+    "Download the latest QQ user avatar to the local media directory and return the local image path.",
+    {
+      user_id: z.string(),
+      size: z.number().int().min(1).max(640).default(640),
+    },
+    async (args) => {
+      const avatar = await downloadQqUserAvatar(store, args.user_id, args.size);
+      return structured(compactActionResponse({
+        ok: true,
+        platform: "qq",
+        action: "download_user_avatar",
+        user_id: args.user_id,
+        path: avatar.path,
+        mime_type: avatar.mimeType,
+        size: avatar.size,
       }));
     },
   );
@@ -476,6 +497,50 @@ async function downloadQqAttachment(
   throw new Error(`failed to download QQ media: ${errors.join("; ")}`);
 }
 
+async function downloadQqUserAvatar(
+  store: MessageStore,
+  userId: string,
+  size: number,
+): Promise<{ path: string; mimeType: string; size: number }> {
+  const normalizedSize = normalizeQqAvatarSize(size);
+  const response = await fetch(`https://q1.qlogo.cn/g?b=qq&nk=${encodeURIComponent(userId)}&s=${normalizedSize}&v=${Date.now()}`, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`failed to download QQ avatar: HTTP ${response.status}`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const contentType = response.headers.get("content-type")?.split(";")[0].trim() || "";
+  const mimeType = contentType.startsWith("image/") ? contentType : "image/jpeg";
+  const extension = extensionForMimeType(mimeType);
+  const filePath = writeMediaFile(
+    store,
+    `qq-user-avatar-${safeFilenamePart(userId)}${extension}`,
+    buffer,
+  );
+  return {
+    path: filePath,
+    mimeType,
+    size: buffer.byteLength,
+  };
+}
+
+function normalizeQqAvatarSize(size: number): number {
+  if (size <= 40) {
+    return 40;
+  }
+  if (size <= 100) {
+    return 100;
+  }
+  if (size <= 140) {
+    return 140;
+  }
+  return 640;
+}
+
 async function qqCookieCandidates(onebot: OneBotClient, url: string): Promise<string[]> {
   const host = safeHostname(url);
   const requests = [
@@ -523,6 +588,25 @@ function safeHostname(url: string): string | null {
     return new URL(url).hostname;
   } catch {
     return null;
+  }
+}
+
+function safeFilenamePart(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]/g, "_");
+}
+
+function extensionForMimeType(mimeType: string): string {
+  switch (mimeType.toLowerCase()) {
+    case "image/png":
+      return ".png";
+    case "image/webp":
+      return ".webp";
+    case "image/gif":
+      return ".gif";
+    case "image/jpeg":
+    case "image/jpg":
+    default:
+      return ".jpg";
   }
 }
 
@@ -648,6 +732,27 @@ function registerTelegramTools(
         action: "download_media",
         path: filePath,
         attachment: compactAttachment(attachment),
+      }));
+    },
+  );
+
+  server.tool(
+    "telegram_download_user_avatar",
+    "Download the latest Telegram user avatar to the local media directory and return the local image path.",
+    {
+      user_id: z.string(),
+      photo_index: z.number().int().min(0).default(0),
+    },
+    async (args) => {
+      const avatar = await telegram.downloadUserAvatar(store, args.user_id, args.photo_index);
+      return structured(compactActionResponse({
+        ok: true,
+        platform: "telegram",
+        action: "download_user_avatar",
+        user_id: args.user_id,
+        path: avatar.path,
+        mime_type: avatar.mimeType,
+        size: avatar.size,
       }));
     },
   );
