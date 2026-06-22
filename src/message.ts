@@ -445,7 +445,7 @@ function buildQqAstralPrompt(message: StoredMessage): string {
   lines.push("");
   lines.push("history:");
   lines.push(
-    "Use QQ MCP tools mcp__qq__qq_get_unread_messages, mcp__qq__qq_get_recent_messages, mcp__qq__qq_get_message, mcp__qq__qq_search_messages, or mcp__qq__qq_download_media when you need more QQ context or media content.",
+    "Use QQ MCP tools mcp__qq__qq_get_unread_messages, mcp__qq__qq_get_recent_messages, mcp__qq__qq_get_message, query_messages_advanced, or mcp__qq__qq_download_media when you need more QQ context or media content.",
   );
   lines.push("");
   lines.push("reply_policy:");
@@ -464,7 +464,7 @@ function buildQqAstralPrompt(message: StoredMessage): string {
     "To mention people inside a group message, use mcp__qq__qq_send_group_message parts in the exact order you want: {type:\"text\",text:\"...\"}, {type:\"at\",user_id:\"...\"}, {type:\"image\",file:\"/workspace/example.png\"}. Split surrounding text into separate text parts so @mentions can appear in the middle or multiple places. If you use both parts and message, parts are sent first and message is appended as the full body.",
   );
   lines.push(
-    "To reply to a specific QQ message, pass reply_to_message_id to mcp__qq__qq_send_group_message or mcp__qq__qq_send_private_message. You can get message ids from the current inbound message_id, mcp__qq__qq_get_recent_messages, mcp__qq__qq_get_message, or mcp__qq__qq_search_messages.",
+    "To reply to a specific QQ message, pass reply_to_message_id to mcp__qq__qq_send_group_message or mcp__qq__qq_send_private_message. You can get message ids from the current inbound message_id, mcp__qq__qq_get_recent_messages, mcp__qq__qq_get_message, or query_messages_advanced.",
   );
   lines.push(
     `When a lightweight acknowledgement is enough, you may react to a QQ group message instead of sending text by calling mcp__qq__qq_set_reaction with message_id and emoji_id. QQ reactions only work in group chats. Available/common emoji_id values: ${QQ_REACTION_EMOJI_IDS}.`,
@@ -562,7 +562,7 @@ function buildTelegramAstralPrompt(message: StoredMessage): string {
   lines.push("");
   lines.push("history:");
   lines.push(
-    "Use Telegram MCP tools mcp__telegram__telegram_get_unread_messages, mcp__telegram__telegram_get_recent_messages, mcp__telegram__telegram_get_message, mcp__telegram__telegram_search_messages, or mcp__telegram__telegram_download_media when you need more Telegram context or media content.",
+    "Use Telegram MCP tools mcp__telegram__telegram_get_unread_messages, mcp__telegram__telegram_get_recent_messages, mcp__telegram__telegram_get_message, query_messages_advanced, or mcp__telegram__telegram_download_media when you need more Telegram context or media content.",
   );
   lines.push("");
   lines.push("reply_policy:");

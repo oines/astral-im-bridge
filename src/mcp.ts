@@ -175,34 +175,8 @@ function createBridgeMcpServer(
   );
 
   server.tool(
-    "qq_search_messages",
-    "Search stored QQ text messages in a group or private conversation.",
-    {
-      target_type: z.enum(["group", "private"]),
-      target_id: z.string(),
-      query: z.string(),
-      limit: z.number().int().min(1).max(100).default(20),
-    },
-    async (args) => structured(historyMessagesResponse(
-      store.searchMessages(
-        "qq",
-        args.target_type as SourceType,
-        args.target_id,
-        args.query,
-        args.limit,
-      ),
-      {
-        platform: "qq",
-        target_type: args.target_type,
-        target_id: args.target_id,
-        query: args.query,
-      },
-    )),
-  );
-
-  server.tool(
     "query_messages_advanced",
-    "Advanced read-only SQL query over stored QQ and Telegram message history. Use qq_get_recent_messages/telegram_get_recent_messages, get_unread, get_message, or search tools for simple lookups; use this only for cross-platform queries, time ranges, sender filters, attachment joins, reply relationships, or aggregate statistics. Queryable tables: messages(id, platform, platform_message_id, source_type, target_id, group_id, group_name, user_id, nickname, group_card, role, time, text, raw_message, trigger, reply_to_message_id, raw_event_json) and attachments(id, message_row_id, kind, file_id, name, url, path, mime_type, size, raw_json). Only a single SELECT statement is supported; WITH and write/admin statements are rejected.",
+    "Advanced read-only SQL query over stored QQ and Telegram message history. Use qq_get_recent_messages/telegram_get_recent_messages, get_unread, or get_message for simple lookups; use this only for cross-platform queries, time ranges, sender filters, attachment joins, reply relationships, full-text search ranking, or aggregate statistics. Queryable tables: messages(id, platform, platform_message_id, source_type, target_id, group_id, group_name, user_id, nickname, group_card, role, time, text, raw_message, trigger, reply_to_message_id, raw_event_json), attachments(id, message_row_id, kind, file_id, name, url, path, mime_type, size, raw_json), and messages_fts(rowid, text, raw_message, sender, conversation). For ranked full-text search, join messages_fts to messages and order by bm25(messages_fts), e.g. SELECT m.platform, m.platform_message_id, m.text, bm25(messages_fts) AS rank FROM messages_fts JOIN messages AS m ON m.id = messages_fts.rowid WHERE messages_fts MATCH '图片 OR 电路图' ORDER BY rank LIMIT 20. Only a single SELECT statement is supported; WITH and write/admin statements are rejected.",
     {
       sql: z.string().trim().min(1).max(5000).describe("Single read-only SELECT query over messages and/or attachments."),
       max_rows: z.number().int().min(1).max(100).default(50).describe("Maximum rows to return; default 50, maximum 100."),
@@ -709,32 +683,6 @@ function registerTelegramTools(
       args.chat_id,
       args.limit,
     ))),
-  );
-
-  server.tool(
-    "telegram_search_messages",
-    "Search stored Telegram text messages in one chat.",
-    {
-      chat_id: z.string(),
-      target_type: z.enum(["group", "private"]).default("group"),
-      query: z.string(),
-      limit: z.number().int().min(1).max(100).default(20),
-    },
-    async (args) => structured(historyMessagesResponse(
-      store.searchMessages(
-        "telegram",
-        args.target_type as SourceType,
-        args.chat_id,
-        args.query,
-        args.limit,
-      ),
-      {
-        platform: "telegram",
-        target_type: args.target_type,
-        target_id: args.chat_id,
-        query: args.query,
-      },
-    )),
   );
 
   server.tool(

@@ -237,7 +237,6 @@ endpoint under both `qq` and `telegram` gives the agent natural tool names such 
 | `qq_get_unread_messages` | Return the unread batch counted by the latest inbound Astral prompt. |
 | `qq_get_recent_messages` | Return recent stored messages for one group or private conversation. |
 | `qq_get_message` | Return one stored message by OneBot `message_id`. |
-| `qq_search_messages` | Search stored text messages in one conversation. |
 | `qq_get_conversation_state` | Return bridge state and counts for one conversation. |
 | `qq_download_media` | Download a stored image/file attachment into the local media cache. |
 | `qq_set_reaction` | React to a stored QQ group message by OneBot `message_id` and QQ `emoji_id`. QQ reactions only work in group chats; the tool description lists common `emoji_id` values. |
@@ -260,7 +259,6 @@ endpoint under both `qq` and `telegram` gives the agent natural tool names such 
 | `telegram_get_unread_messages` | Return the unread batch counted by the latest inbound Astral prompt. |
 | `telegram_get_recent_messages` | Return recent stored messages for one Telegram chat. |
 | `telegram_get_message` | Return one stored Telegram message by `message_id`. |
-| `telegram_search_messages` | Search stored Telegram text messages in one chat. |
 | `telegram_get_conversation_state` | Return bridge state and counts for one Telegram chat. |
 | `telegram_download_media` | Download a stored Telegram attachment into the local media cache. |
 

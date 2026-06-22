@@ -17,6 +17,8 @@ const ADVANCED_QUERY_MAX_ROWS = 100;
 const ADVANCED_QUERY_MAX_SQL_CHARS = 5000;
 const ADVANCED_QUERY_MAX_CELL_CHARS = 500;
 const ADVANCED_QUERY_MAX_JSON_BYTES = 64 * 1024;
+const MESSAGES_FTS_INDEX_VERSION = "1";
+const MESSAGES_FTS_META_KEY = "messages_fts_index_version";
 
 export interface AdvancedMessageQueryResult {
   ok: true;
@@ -104,6 +106,7 @@ export class MessageStore {
         JSON.stringify(attachment.raw),
       );
     }
+    this.upsertMessageFts(row.id, message);
     return row.id;
   }
 
@@ -177,17 +180,22 @@ export class MessageStore {
     limit: number,
   ): StoredMessage[] {
     const boundedLimit = Math.min(Math.max(limit, 1), 100);
-    const like = `%${query.replaceAll("%", "\\%").replaceAll("_", "\\_")}%`;
+    const matchQuery = buildFtsMatchQuery(query);
+    if (!matchQuery) {
+      return [];
+    }
     const rows = this.db
       .prepare(
-        `SELECT * FROM messages
-         WHERE platform = ? AND source_type = ? AND target_id = ?
-           AND (text LIKE ? ESCAPE '\\' OR raw_message LIKE ? ESCAPE '\\')
-         ORDER BY time DESC, id DESC
+        `SELECT messages.*
+         FROM messages_fts
+         INNER JOIN messages ON messages.id = messages_fts.rowid
+         WHERE messages.platform = ? AND messages.source_type = ? AND messages.target_id = ?
+           AND messages_fts MATCH ?
+         ORDER BY bm25(messages_fts), messages.time DESC, messages.id DESC
          LIMIT ?`,
       )
-      .all(platform, sourceType, targetId, like, like, boundedLimit) as unknown as StoredMessageRow[];
-    return rows.reverse().map((row) => this.rowToMessage(row));
+      .all(platform, sourceType, targetId, matchQuery, boundedLimit) as unknown as StoredMessageRow[];
+    return rows.map((row) => this.rowToMessage(row));
   }
 
   queryMessagesAdvanced(sql: string, maxRows = ADVANCED_QUERY_DEFAULT_ROWS): AdvancedMessageQueryResult {
@@ -492,6 +500,7 @@ export class MessageStore {
     this.rebuildLegacyPlatformTables();
     this.createMessageTables();
     this.ensureConversationCursorColumns();
+    this.ensureMessageFtsIndex();
 
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_messages_conversation_time
@@ -569,6 +578,23 @@ export class MessageStore {
         last_prompt_unread_count INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY(platform, source_type, target_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS store_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+  }
+
+  private createMessageFtsTable(): void {
+    this.db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+        text,
+        raw_message,
+        sender,
+        conversation,
+        tokenize = 'unicode61'
       );
     `);
   }
@@ -659,6 +685,165 @@ export class MessageStore {
       .all() as unknown as Array<{ name: string }>;
     return new Set(rows.map((row) => row.name));
   }
+
+  private tableExists(tableName: string): boolean {
+    const row = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ? LIMIT 1")
+      .get(tableName);
+    return !!row;
+  }
+
+  private metaValue(key: string): string | null {
+    const row = this.db.prepare("SELECT value FROM store_meta WHERE key = ?").get(key) as
+      | { value: string }
+      | undefined;
+    return row?.value ?? null;
+  }
+
+  private setMetaValue(key: string, value: string): void {
+    this.db
+      .prepare("INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run(key, value);
+  }
+
+  private ensureMessageFtsIndex(): void {
+    const hasFts = this.tableExists("messages_fts");
+    if (!hasFts || this.metaValue(MESSAGES_FTS_META_KEY) !== MESSAGES_FTS_INDEX_VERSION) {
+      if (hasFts) {
+        this.db.exec("DROP TABLE messages_fts");
+      }
+      this.createMessageFtsTable();
+      this.rebuildMessageFtsIndex();
+      this.setMetaValue(MESSAGES_FTS_META_KEY, MESSAGES_FTS_INDEX_VERSION);
+      return;
+    }
+    this.createMessageFtsTable();
+  }
+
+  private rebuildMessageFtsIndex(): void {
+    this.db.exec("DELETE FROM messages_fts");
+    const rows = this.db.prepare("SELECT * FROM messages ORDER BY id ASC").all() as unknown as StoredMessageRow[];
+    for (const row of rows) {
+      this.upsertMessageFtsFromRow(row);
+    }
+  }
+
+  private upsertMessageFts(rowId: number, message: StoredMessage): void {
+    this.writeMessageFts(rowId, {
+      platform: message.platform,
+      sourceType: message.sourceType,
+      targetId: message.targetId,
+      groupId: message.groupId,
+      groupName: message.groupName,
+      userId: message.userId,
+      nickname: message.nickname,
+      groupCard: message.groupCard,
+      role: message.role,
+      text: message.text,
+      rawMessage: message.rawMessage,
+    });
+  }
+
+  private upsertMessageFtsFromRow(row: StoredMessageRow): void {
+    this.writeMessageFts(row.id, {
+      platform: row.platform,
+      sourceType: row.source_type,
+      targetId: row.target_id,
+      groupId: row.group_id,
+      groupName: row.group_name,
+      userId: row.user_id,
+      nickname: row.nickname,
+      groupCard: row.group_card,
+      role: row.role,
+      text: row.text,
+      rawMessage: row.raw_message,
+    });
+  }
+
+  private writeMessageFts(rowId: number, message: MessageFtsSource): void {
+    this.db.prepare("DELETE FROM messages_fts WHERE rowid = ?").run(rowId);
+    this.db.prepare(`
+      INSERT INTO messages_fts (rowid, text, raw_message, sender, conversation)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      rowId,
+      buildFtsIndexText(message.text),
+      buildFtsIndexText(message.rawMessage),
+      buildFtsIndexText(message.userId, message.nickname, message.groupCard, message.role),
+      buildFtsIndexText(
+        message.platform,
+        message.sourceType,
+        message.targetId,
+        message.groupId,
+        message.groupName,
+      ),
+    );
+  }
+}
+
+interface MessageFtsSource {
+  platform: Platform;
+  sourceType: SourceType;
+  targetId: string;
+  groupId: string | null;
+  groupName: string | null;
+  userId: string;
+  nickname: string | null;
+  groupCard: string | null;
+  role: string | null;
+  text: string;
+  rawMessage: string;
+}
+
+function buildFtsIndexText(...parts: Array<string | null | undefined>): string {
+  const values = parts.map((part) => part?.trim()).filter((part): part is string => !!part);
+  const tokens = new Set<string>();
+  for (const value of values) {
+    for (const token of cjkNgramTokens(value)) {
+      tokens.add(token);
+    }
+  }
+  return [...values, ...tokens].join(" ");
+}
+
+function buildFtsMatchQuery(query: string): string {
+  const terms = new Set<string>();
+  const trimmed = query.trim();
+  if (!trimmed) {
+    return "";
+  }
+  terms.add(trimmed);
+  for (const term of asciiSearchTerms(trimmed)) {
+    terms.add(term);
+  }
+  for (const term of cjkNgramTokens(trimmed)) {
+    terms.add(term);
+  }
+  return [...terms].map(quoteFtsTerm).join(" OR ");
+}
+
+function quoteFtsTerm(term: string): string {
+  return `"${term.replaceAll("\"", "\"\"")}"`;
+}
+
+function asciiSearchTerms(value: string): string[] {
+  return value.match(/[A-Za-z0-9_][A-Za-z0-9_.:-]*/g) ?? [];
+}
+
+function cjkNgramTokens(value: string): string[] {
+  const tokens = new Set<string>();
+  for (const match of value.matchAll(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu)) {
+    const run = match[0];
+    for (const size of [2, 3]) {
+      if (run.length < size) {
+        continue;
+      }
+      for (let i = 0; i <= run.length - size; i += 1) {
+        tokens.add(run.slice(i, i + size));
+      }
+    }
+  }
+  return [...tokens];
 }
 
 function normalizeAdvancedQuerySql(sql: string): string {
