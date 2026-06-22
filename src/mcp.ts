@@ -440,6 +440,41 @@ function createBridgeMcpServer(
   );
 
   registerGroupAdminTools(server, config, onebot);
+
+  server.tool(
+    "query_messages",
+    "Execute a read-only SQL query against the unified message database (QQ + Telegram). Only SELECT/WITH queries allowed. Schema: messages(id, platform, platform_message_id, source_type, target_id, group_id, group_name, user_id, nickname, group_card, role, time, text, raw_message, trigger, reply_to_message_id) and attachments(id, message_row_id, kind, file_id, name, url, path, mime_type, size).",
+    {
+      sql: z.string().min(1).max(5000).describe("SQL SELECT query to execute"),
+      max_rows: z.number().int().min(1).max(500).default(100).describe("Maximum number of rows to return"),
+    },
+    async (args) => {
+      try {
+        const result = store.executeQuery(args.sql, args.max_rows);
+        const compact = JSON.stringify({
+          columns: result.columns,
+          rows: result.rows,
+          returned_count: result.returned_count,
+          truncated: result.truncated,
+        });
+        return {
+          content: [{
+            type: "text" as const,
+            text: compact,
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Query error: ${err instanceof Error ? err.message : String(err)}`,
+          }],
+          isError: true,
+        };
+      }
+    },
+  );
+
   if (telegram) {
     registerTelegramTools(server, config, telegram, store);
   }
@@ -706,34 +741,6 @@ function registerTelegramTools(
         query: args.query,
       },
     )),
-  );
-
-  server.tool(
-    "execute_query",
-    "Execute a read-only SQL query against the unified message database. Only SELECT queries allowed. The messages table has columns: id, platform (qq/telegram), platform_message_id, source_type (group/private), target_id (chat_id), group_id, group_name, user_id, nickname, group_card, role, time (unix timestamp), text, raw_message, trigger, reply_to_message_id. Attachments table: id, message_row_id, kind, file_id, name, url, path, mime_type, size.",
-    {
-      sql: z.string().min(1).max(5000).describe("SQL SELECT query to execute"),
-      max_rows: z.number().int().min(1).max(500).default(100).describe("Maximum number of rows to return"),
-    },
-    async (args) => {
-      try {
-        const result = store.executeQuery(args.sql, args.max_rows);
-        return {
-          content: [{
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          }],
-        };
-      } catch (err) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Query error: ${err instanceof Error ? err.message : String(err)}`,
-          }],
-          isError: true,
-        };
-      }
-    },
   );
 
   server.tool(

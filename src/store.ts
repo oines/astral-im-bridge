@@ -176,23 +176,80 @@ export class MessageStore {
 
   /**
    * Execute a read-only SQL query against the message database.
-   * Only SELECT queries are allowed. Returns up to `maxRows` rows.
+   * Only SELECT/WITH queries are allowed. Returns up to `maxRows` rows
+   * with byte-safe truncation.
    */
-  executeQuery(sql: string, maxRows: number = 100): { columns: string[]; rows: Record<string, unknown>[] } {
+  executeQuery(
+    sql: string,
+    maxRows: number = 100,
+    maxBytes: number = 64_000,
+    maxCellBytes: number = 4_000,
+  ): {
+    columns: string[];
+    rows: Record<string, unknown>[];
+    returned_count: number;
+    truncated: boolean;
+  } {
     const trimmed = sql.trim();
-    if (/^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|REPLACE|PRAGMA|VACUUM|REINDEX|ANALYZE|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|EXPLAIN|WITH)\b/i.test(trimmed)) {
+    // Reject any write/admin statement
+    if (/^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|REPLACE|PRAGMA|VACUUM|REINDEX|ANALYZE|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|EXPLAIN)\b/i.test(trimmed)) {
       throw new Error("Only SELECT queries are allowed");
     }
+    // Must start with WITH or SELECT
     if (!/^\s*(WITH|SELECT)\b/i.test(trimmed)) {
       throw new Error("Query must start with SELECT or WITH");
     }
 
-    const boundedSql = trimmed.replace(/;$/, "");
-    const stmt = this.db.prepare(boundedSql);
+    // Remove trailing semicolons
+    const boundedSql = trimmed.replace(/;+\s*$/, "");
+
+    // Push LIMIT down: if user query has no LIMIT, wrap with one
+    const hasLimit = /\bLIMIT\s+\d+/i.test(boundedSql);
+    const safeMax = Math.min(Math.max(maxRows, 1), 500);
+    const wrappedSql = hasLimit ? boundedSql : `${boundedSql} LIMIT ${safeMax + 1}`;
+
+    const stmt = this.db.prepare(wrappedSql);
     const columns = stmt.columns().map((c) => c.name);
-    const rawRows = stmt.all(...[]) as Record<string, unknown>[];
-    const limitedRows = rawRows.slice(0, Math.min(maxRows, 500));
-    return { columns, rows: limitedRows };
+    const rawRows = stmt.all() as Record<string, unknown>[];
+
+    // Truncate oversized cells
+    const truncatedRows = rawRows.map((row) => {
+      const out: Record<string, unknown> = {};
+      for (const col of columns) {
+        const val = row[col];
+        if (typeof val === "string" && val.length > maxCellBytes) {
+          out[col] = val.slice(0, maxCellBytes) + `...[truncated ${val.length} chars]`;
+        } else {
+          out[col] = val;
+        }
+      }
+      return out;
+    });
+
+    // Enforce row limit
+    const sliced = truncatedRows.slice(0, safeMax);
+    const totalFetched = rawRows.length;
+    const wasLimitedByQuery = hasLimit;
+    const truncated = wasLimitedByQuery ? totalFetched > safeMax : rawRows.length > safeMax;
+
+    // Enforce total byte budget
+    let jsonSize = 0;
+    const finalRows: Record<string, unknown>[] = [];
+    for (const row of sliced) {
+      const rowJson = JSON.stringify(row);
+      jsonSize += rowJson.length;
+      if (jsonSize > maxBytes) {
+        break;
+      }
+      finalRows.push(row);
+    }
+
+    return {
+      columns,
+      rows: finalRows,
+      returned_count: finalRows.length,
+      truncated: truncated || finalRows.length < sliced.length,
+    };
   }
 
   getAttachment(id: number): StoredAttachment | null {
