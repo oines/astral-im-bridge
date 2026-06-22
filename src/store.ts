@@ -174,6 +174,27 @@ export class MessageStore {
     return rows.reverse().map((row) => this.rowToMessage(row));
   }
 
+  /**
+   * Execute a read-only SQL query against the message database.
+   * Only SELECT queries are allowed. Returns up to `maxRows` rows.
+   */
+  executeQuery(sql: string, maxRows: number = 100): { columns: string[]; rows: Record<string, unknown>[] } {
+    const trimmed = sql.trim();
+    if (/^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|REPLACE|PRAGMA|VACUUM|REINDEX|ANALYZE|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|EXPLAIN|WITH)\b/i.test(trimmed)) {
+      throw new Error("Only SELECT queries are allowed");
+    }
+    if (!/^\s*(WITH|SELECT)\b/i.test(trimmed)) {
+      throw new Error("Query must start with SELECT or WITH");
+    }
+
+    const boundedSql = trimmed.replace(/;$/, "");
+    const stmt = this.db.prepare(boundedSql);
+    const columns = stmt.columns().map((c) => c.name);
+    const rawRows = stmt.all(...[]) as Record<string, unknown>[];
+    const limitedRows = rawRows.slice(0, Math.min(maxRows, 500));
+    return { columns, rows: limitedRows };
+  }
+
   getAttachment(id: number): StoredAttachment | null {
     const row = this.db.prepare("SELECT * FROM attachments WHERE id = ?").get(id) as AttachmentRow | undefined;
     return row ? attachmentFromRow(row) : null;
