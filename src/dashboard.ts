@@ -135,6 +135,7 @@ export function dashboardHtml(): string {
     }
     .label { color: var(--muted); font-size: 12px; }
     .value { margin-top: 5px; font-size: 18px; font-weight: 700; overflow-wrap: anywhere; }
+    .subvalue { margin-top: 2px; color: var(--muted); font-size: 12px; font-weight: 500; }
     .ok { color: var(--ok); }
     .warn { color: var(--warn); }
     .bad { color: var(--bad); }
@@ -210,6 +211,9 @@ export function dashboardHtml(): string {
           <div class="metric"><div class="label">Telegram</div><div id="telegram" class="value">-</div></div>
           <div class="metric"><div class="label">Astral</div><div id="astral" class="value">-</div></div>
           <div class="metric"><div class="label">Active turn</div><div id="turn" class="value">-</div></div>
+          <div class="metric"><div class="label">Context</div><div id="context" class="value">-</div></div>
+          <div class="metric"><div class="label">Cache hit</div><div id="cache" class="value">-</div></div>
+          <div class="metric"><div class="label">Compact</div><div id="compact" class="value">-</div></div>
           <div class="metric"><div class="label">Uptime</div><div id="uptime" class="value">-</div></div>
         </div>
       </section>
@@ -247,6 +251,40 @@ export function dashboardHtml(): string {
       const text = String(value ?? '');
       return text.length > 80 ? text.slice(0, 77) + '...' : text;
     }
+    function kTokens(value) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return '-';
+      const k = value / 1000;
+      const text = Math.abs(k) >= 100 ? k.toFixed(0) : k.toFixed(1);
+      return text.replace(/\\.0$/, '') + 'k';
+    }
+    function renderSubValue(main, sub, className) {
+      const cls = className ? ' class="' + className + '"' : '';
+      return '<span' + cls + '>' + esc(main) + '</span>' + (sub ? '<div class="subvalue">' + esc(sub) + '</div>' : '');
+    }
+    function renderContext(value) {
+      if (!value || typeof value.usedTokens !== 'number') {
+        return '<span class="muted">unknown</span>';
+      }
+      const windowText = typeof value.windowTokens === 'number' ? ' / ' + kTokens(value.windowTokens) : '';
+      const sub = typeof value.usedPercent === 'number' ? value.usedPercent + '% used' : 'window unknown';
+      return renderSubValue(kTokens(value.usedTokens) + windowText, sub);
+    }
+    function renderCache(value) {
+      if (!value || typeof value.percent !== 'number') {
+        return '<span class="muted">unknown</span>';
+      }
+      const sub =
+        typeof value.cachedInputTokens === 'number' && typeof value.inputTokens === 'number'
+          ? kTokens(value.cachedInputTokens) + ' / ' + kTokens(value.inputTokens)
+          : '';
+      return renderSubValue(value.percent + '%', sub);
+    }
+    function renderCompact(value) {
+      if (value && value.running) {
+        return renderSubValue('running', value.turnId || '', 'warn');
+      }
+      return '<span class="muted">idle</span>';
+    }
     function table(headers, rows) {
       return '<table><thead><tr>' + headers.map((h) => '<th>' + esc(h) + '</th>').join('') + '</tr></thead><tbody>' +
         rows.map((row) => '<tr>' + row.map((cell) => '<td>' + cell + '</td>').join('') + '</tr>').join('') +
@@ -260,6 +298,9 @@ export function dashboardHtml(): string {
       qs('telegram').innerHTML = state.services.telegram.enabled ? yes(state.services.telegram.polling) : '<span class="muted">disabled</span>';
       qs('astral').innerHTML = yes(state.services.astral.connected);
       qs('turn').innerHTML = state.services.astral.activeTurnId ? '<span class="warn">' + esc(state.services.astral.activeTurnId) + '</span>' : '<span class="muted">idle</span>';
+      qs('context').innerHTML = renderContext(state.services.astral.contextWindow);
+      qs('cache').innerHTML = renderCache(state.services.astral.cacheHitRate);
+      qs('compact').innerHTML = renderCompact(state.services.astral.compact);
       qs('uptime').textContent = Math.floor(state.uptimeSeconds / 60) + 'm';
       qs('routing').innerHTML = [
         ['thread', state.routing.fixedThreadId],

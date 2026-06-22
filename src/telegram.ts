@@ -86,6 +86,7 @@ export interface TelegramMessage {
   video_note?: TelegramDocument;
   sticker?: TelegramDocument;
   photo?: TelegramPhotoSize[];
+  rich_message?: unknown;
   [key: string]: unknown;
 }
 
@@ -135,6 +136,16 @@ export interface TelegramSendFileOptions {
   caption?: string;
   replyToMessageId?: string;
   messageThreadId?: string;
+}
+
+export interface TelegramSendRichMessageOptions {
+  chatId: string;
+  html?: string;
+  markdown?: string;
+  replyToMessageId?: string;
+  messageThreadId?: string;
+  isRtl?: boolean;
+  skipEntityDetection?: boolean;
 }
 
 export interface TelegramSetReactionOptions {
@@ -228,6 +239,22 @@ export class TelegramClient extends EventEmitter<TelegramEvents> {
     return this.api<TelegramMessage>("sendDocument", {
       ...params,
       document: options.file,
+    });
+  }
+
+  async sendRichMessage(options: TelegramSendRichMessageOptions): Promise<TelegramMessage> {
+    const richMessage: Record<string, unknown> = {
+      ...(options.html ? { html: options.html } : {}),
+      ...(options.markdown ? { markdown: options.markdown } : {}),
+      ...(options.isRtl == null ? {} : { is_rtl: options.isRtl }),
+      ...(options.skipEntityDetection == null ? {} : { skip_entity_detection: options.skipEntityDetection }),
+    };
+
+    return this.api<TelegramMessage>("sendRichMessage", {
+      chat_id: telegramId(options.chatId),
+      rich_message: richMessage,
+      ...(options.replyToMessageId ? { reply_parameters: { message_id: telegramId(options.replyToMessageId) } } : {}),
+      ...(options.messageThreadId ? { message_thread_id: telegramId(options.messageThreadId) } : {}),
     });
   }
 

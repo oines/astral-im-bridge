@@ -82,6 +82,13 @@ interface TelegramOutboundTextOptions {
   parts?: TelegramOutboundPart[];
 }
 
+interface TelegramRichOutbound {
+  format: "html" | "markdown";
+  content: string;
+  summary: string;
+  segments: MessageSegment[];
+}
+
 export async function startMcpServer(
   config: BridgeConfig,
   onebot: OneBotClient,
@@ -191,6 +198,28 @@ function createBridgeMcpServer(
         query: args.query,
       },
     )),
+  );
+
+  server.tool(
+    "query_messages_advanced",
+    "Advanced read-only SQL query over stored QQ and Telegram message history. Use qq_get_recent_messages/telegram_get_recent_messages, get_unread, get_message, or search tools for simple lookups; use this only for cross-platform queries, time ranges, sender filters, attachment joins, reply relationships, or aggregate statistics. Queryable tables: messages(id, platform, platform_message_id, source_type, target_id, group_id, group_name, user_id, nickname, group_card, role, time, text, raw_message, trigger, reply_to_message_id, raw_event_json) and attachments(id, message_row_id, kind, file_id, name, url, path, mime_type, size, raw_json). Only a single SELECT statement is supported; WITH and write/admin statements are rejected.",
+    {
+      sql: z.string().trim().min(1).max(5000).describe("Single read-only SELECT query over messages and/or attachments."),
+      max_rows: z.number().int().min(1).max(100).default(50).describe("Maximum rows to return; default 50, maximum 100."),
+    },
+    async (args) => {
+      try {
+        return structuredCompact(store.queryMessagesAdvanced(args.sql, args.max_rows));
+      } catch (err) {
+        return {
+          ...structuredCompact({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+          isError: true,
+        };
+      }
+    },
   );
 
   server.tool(
@@ -797,6 +826,54 @@ function registerTelegramTools(
         message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
         reply_to_message_id: args.reply_to_message_id ?? null,
         text: telegramPlainText(outbound.segments),
+      }));
+    },
+  );
+
+  server.tool(
+    "telegram_send_rich_message",
+    "Send a Telegram rich message for structured content such as headings, lists, tables, collapsible details, code blocks, and formulas. Use telegram_send_file for local images/files.",
+    {
+      chat_id: z.string(),
+      html: z.string().optional(),
+      markdown: z.string().optional(),
+      reply_to_message_id: z.string().optional(),
+      message_thread_id: z.string().optional(),
+      is_rtl: z.boolean().optional(),
+      skip_entity_detection: z.boolean().optional(),
+    },
+    async (args) => {
+      const outbound = telegramRichOutbound({
+        html: args.html,
+        markdown: args.markdown,
+      });
+      const response = await telegram.sendRichMessage({
+        chatId: args.chat_id,
+        ...(outbound.format === "html" ? { html: outbound.content } : { markdown: outbound.content }),
+        replyToMessageId: args.reply_to_message_id,
+        messageThreadId: args.message_thread_id,
+        isRtl: args.is_rtl,
+        skipEntityDetection: args.skip_entity_detection,
+      });
+      await saveTelegramOutboundMessage(config, telegram, store, {
+        chatId: args.chat_id,
+        action: "sendRichMessage",
+        response,
+        segments: outbound.segments,
+        replyToMessageId: args.reply_to_message_id,
+      });
+      return structured(compactActionResponse({
+        ok: true,
+        platform: "telegram",
+        action: "send_rich_message",
+        chat_id: args.chat_id,
+        chat_type: response.chat.type,
+        chat_title: telegramChatTitle(response),
+        message_id: String(response.message_id),
+        message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
+        reply_to_message_id: args.reply_to_message_id ?? null,
+        format: outbound.format,
+        summary: outbound.summary,
       }));
     },
   );
@@ -1457,6 +1534,45 @@ function telegramOutboundText(options: TelegramOutboundTextOptions): {
   return { html, segments };
 }
 
+function telegramRichOutbound(options: { html?: string; markdown?: string }): TelegramRichOutbound {
+  const html = options.html?.trim() ?? "";
+  const markdown = options.markdown?.trim() ?? "";
+  if (html && markdown) {
+    throw new Error("telegram_send_rich_message requires exactly one of html or markdown, not both");
+  }
+  if (!html && !markdown) {
+    throw new Error("telegram_send_rich_message requires non-empty html or markdown");
+  }
+
+  const format = html ? "html" : "markdown";
+  const content = html || markdown;
+  const summary = `rich ${format}: ${richMessagePreview(content, format)}`;
+  return {
+    format,
+    content,
+    summary,
+    segments: [{ type: "text", data: { text: summary } }],
+  };
+}
+
+function richMessagePreview(content: string, format: "html" | "markdown"): string {
+  const text = format === "html" ? stripHtmlForPreview(content) : content;
+  return truncateText(text.replace(/\s+/g, " ").trim(), 240);
+}
+
+function stripHtmlForPreview(value: string): string {
+  return value
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&apos;/gi, "'");
+}
+
 function appendTelegramOutboundPart(
   part: TelegramOutboundPart,
   htmlParts: string[],
@@ -1922,6 +2038,16 @@ function structured(value: unknown): {
 } {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+    structuredContent: isPlainObject(value) ? value : { result: value },
+  };
+}
+
+function structuredCompact(value: unknown): {
+  content: Array<{ type: "text"; text: string }>;
+  structuredContent: Record<string, unknown>;
+} {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(value) }],
     structuredContent: isPlainObject(value) ? value : { result: value },
   };
 }

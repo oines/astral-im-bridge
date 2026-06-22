@@ -38,6 +38,7 @@
 - Telegram 私聊、群、超级群、频道消息：使用 `mcp__telegram__telegram_send_message` 回复到 `chat_id`。如果输入里有 `message_thread_id`，回复时也传同一个 `message_thread_id`。
 - Telegram 需要回复指定消息时，传 `reply_to_message_id`。当前触发消息的 `message_id` 可以直接用；历史消息可用 `mcp__telegram__telegram_get_recent_messages`、`mcp__telegram__telegram_get_message` 或 `mcp__telegram__telegram_search_messages` 查。
 - Telegram 需要 @ 人时，使用 `telegram_send_message` 的 `parts`：username 用 `{ type: "mention", username: "alice" }`，只有 user_id 时用 `{ type: "mention", user_id: "123456", text: "Alice" }`。
+- Telegram 需要结构化富文本（标题、列表、表格、折叠详情、代码块、公式）时，使用 `mcp__telegram__telegram_send_rich_message`，传 `chat_id` 和 `html`/`markdown` 二选一。
 - Telegram 图片和非图片文件都用 `mcp__telegram__telegram_send_file`，传 `file: "/workspace/example.png"` 或 `/app/media/...`，可加 `caption`。不要使用 Markdown 图片路径当作回复。
 - 每条 Telegram 输入可能包含 `conversation_unread`。需要上下文时用 `mcp__telegram__telegram_get_unread_messages`、`mcp__telegram__telegram_get_recent_messages`、`mcp__telegram__telegram_get_message`、`mcp__telegram__telegram_search_messages` 或 `mcp__telegram__telegram_download_media`。
 - Telegram 撤回/删除消息使用 `mcp__telegram__telegram_delete_message`，必须传 `confirm: true`；只有用户明确要求删除时才调用，且 Telegram 可能因为 bot 权限或平台规则拒绝。

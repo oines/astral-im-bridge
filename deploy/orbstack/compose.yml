@@ -30,6 +30,7 @@ services:
       - ./bridge/config:/config
       - ./bridge/data:/app/data
       - ./bridge/media:/app/media
+      - ./workspace:/workspace:ro
     ports:
       - "${PUBLISH_HOST:-127.0.0.1}:${BRIDGE_ONEBOT_PORT:-6701}:6701"
       - "${PUBLISH_HOST:-127.0.0.1}:${BRIDGE_MCP_PORT:-6710}:6710"

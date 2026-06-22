@@ -11,6 +11,27 @@ interface PendingRequest {
   reject: (error: Error) => void;
 }
 
+interface TokenUsageBreakdown {
+  totalTokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+}
+
+interface ThreadTokenUsage {
+  total: TokenUsageBreakdown;
+  last: TokenUsageBreakdown;
+  modelContextWindow: number | null;
+}
+
+interface CompactStatus {
+  running: boolean;
+  turnId: string | null;
+  itemId: string | null;
+  startedAtMs: number | null;
+}
+
 export interface InterruptActiveTurnResult {
   interrupted: boolean;
   turnId: string | null;
@@ -25,6 +46,8 @@ export class AstralAppServerClient extends EventEmitter {
   private resumed = false;
   private activeTurnId: string | null = null;
   private modelSettingsSynced = false;
+  private tokenUsage: ThreadTokenUsage | null = null;
+  private compactStatus: CompactStatus = idleCompactStatus();
 
   constructor(private readonly config: AstralConfig) {
     super();
@@ -65,6 +88,10 @@ export class AstralAppServerClient extends EventEmitter {
     return { interrupted: true, turnId };
   }
 
+  async warmup(): Promise<void> {
+    await this.ensureThread();
+  }
+
   status(): Record<string, unknown> {
     return {
       connected: this.socket?.readyState === WebSocket.OPEN,
@@ -75,6 +102,10 @@ export class AstralAppServerClient extends EventEmitter {
       modelProvider: this.config.modelProvider,
       model: this.config.model,
       modelSettingsSynced: this.modelSettingsSynced,
+      tokenUsage: this.tokenUsage,
+      contextWindow: contextWindowStatus(this.tokenUsage),
+      cacheHitRate: cacheHitRateStatus(this.tokenUsage),
+      compact: { ...this.compactStatus },
     };
   }
 
@@ -264,6 +295,7 @@ export class AstralAppServerClient extends EventEmitter {
       this.resumed = false;
       this.activeTurnId = null;
       this.modelSettingsSynced = false;
+      this.compactStatus = idleCompactStatus();
       for (const pending of this.pending.values()) {
         pending.reject(new Error("Astral app-server websocket closed"));
       }
@@ -354,11 +386,71 @@ export class AstralAppServerClient extends EventEmitter {
       return;
     }
 
-    if (message.method === "turn/completed" && message.params?.threadId === this.config.threadId) {
-      const turnId = message.params?.turn?.id;
-      if (turnId && turnId === this.activeTurnId) {
-        this.activeTurnId = null;
+    this.handleNotification(message);
+  }
+
+  private handleNotification(message: unknown): void {
+    if (!isRecord(message) || typeof message.method !== "string") {
+      return;
+    }
+    const params = isRecord(message.params) ? message.params : null;
+    if (!params || params.threadId !== this.config.threadId) {
+      return;
+    }
+
+    switch (message.method) {
+      case "thread/tokenUsage/updated": {
+        const tokenUsage = normalizeThreadTokenUsage(params.tokenUsage);
+        if (!tokenUsage) {
+          warn("ignored malformed astral token usage notification");
+          return;
+        }
+        this.tokenUsage = tokenUsage;
+        return;
       }
+      case "turn/started": {
+        const turn = isRecord(params.turn) ? params.turn : null;
+        const turnId = stringValue(turn?.id);
+        if (turnId) {
+          this.activeTurnId = turnId;
+        }
+        return;
+      }
+      case "turn/completed": {
+        const turn = isRecord(params.turn) ? params.turn : null;
+        const turnId = stringValue(turn?.id) ?? stringValue(params.turnId);
+        if (turnId && turnId === this.activeTurnId) {
+          this.activeTurnId = null;
+        }
+        if (turnId && turnId === this.compactStatus.turnId) {
+          this.compactStatus = idleCompactStatus();
+        }
+        return;
+      }
+      case "item/started": {
+        const item = isRecord(params.item) ? params.item : null;
+        if (item?.type === "contextCompaction") {
+          this.compactStatus = {
+            running: true,
+            turnId: stringValue(params.turnId),
+            itemId: stringValue(item.id),
+            startedAtMs: numberValue(params.startedAtMs) ?? null,
+          };
+        }
+        return;
+      }
+      case "item/completed": {
+        const item = isRecord(params.item) ? params.item : null;
+        if (item?.type === "contextCompaction") {
+          this.compactStatus = idleCompactStatus();
+        }
+        return;
+      }
+      case "thread/compacted":
+        this.compactStatus = idleCompactStatus();
+        return;
+      default:
+        return;
     }
   }
 
@@ -395,4 +487,111 @@ function safeServerRequestResponse(method: string): Record<string, unknown> | nu
     default:
       return null;
   }
+}
+
+function idleCompactStatus(): CompactStatus {
+  return {
+    running: false,
+    turnId: null,
+    itemId: null,
+    startedAtMs: null,
+  };
+}
+
+function contextWindowStatus(usage: ThreadTokenUsage | null): Record<string, unknown> | null {
+  if (!usage) {
+    return null;
+  }
+  const usedTokens = Math.max(0, usage.last.totalTokens);
+  const windowTokens =
+    usage.modelContextWindow !== null && usage.modelContextWindow > 0
+      ? usage.modelContextWindow
+      : null;
+  const remainingTokens = windowTokens === null ? null : Math.max(0, windowTokens - usedTokens);
+  const usedPercent =
+    windowTokens === null ? null : clampPercent(Math.round((usedTokens / windowTokens) * 100));
+  return {
+    usedTokens,
+    windowTokens,
+    remainingTokens,
+    usedPercent,
+  };
+}
+
+function cacheHitRateStatus(usage: ThreadTokenUsage | null): Record<string, unknown> | null {
+  if (!usage) {
+    return null;
+  }
+  const inputTokens = Math.max(0, usage.total.inputTokens);
+  if (inputTokens === 0) {
+    return null;
+  }
+  const cachedInputTokens = Math.min(Math.max(0, usage.total.cachedInputTokens), inputTokens);
+  const percent = Math.floor((cachedInputTokens * 100 + Math.floor(inputTokens / 2)) / inputTokens);
+  return {
+    percent: clampPercent(percent),
+    cachedInputTokens,
+    inputTokens,
+  };
+}
+
+function normalizeThreadTokenUsage(value: unknown): ThreadTokenUsage | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const total = normalizeTokenUsageBreakdown(value.total);
+  const last = normalizeTokenUsageBreakdown(value.last);
+  const modelContextWindow =
+    value.modelContextWindow === null ? null : numberValue(value.modelContextWindow);
+  if (!total || !last || modelContextWindow === undefined) {
+    return null;
+  }
+  return {
+    total,
+    last,
+    modelContextWindow,
+  };
+}
+
+function normalizeTokenUsageBreakdown(value: unknown): TokenUsageBreakdown | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const totalTokens = numberValue(value.totalTokens);
+  const inputTokens = numberValue(value.inputTokens);
+  const cachedInputTokens = numberValue(value.cachedInputTokens);
+  const outputTokens = numberValue(value.outputTokens);
+  const reasoningOutputTokens = numberValue(value.reasoningOutputTokens);
+  if (
+    totalTokens === undefined ||
+    inputTokens === undefined ||
+    cachedInputTokens === undefined ||
+    outputTokens === undefined ||
+    reasoningOutputTokens === undefined
+  ) {
+    return null;
+  }
+  return {
+    totalTokens,
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(100, value));
 }

@@ -61,6 +61,9 @@ async function main(): Promise<void> {
     error("telegram startup failed; continuing without telegram polling", { error: String(err) });
   });
   await startMcpServer(config, onebot, telegram, store, astral);
+  void astral.warmup().catch((err) => {
+    warn("astral warmup failed; will retry on first inbound message", { error: String(err) });
+  });
 }
 
 async function handleOneBotMessage(

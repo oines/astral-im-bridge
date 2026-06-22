@@ -573,6 +573,9 @@ function buildTelegramAstralPrompt(message: StoredMessage): string {
     "For text replies call mcp__telegram__telegram_send_message with chat_id and optional reply_to_message_id. If message_thread_id is present, pass it so the reply stays in the same topic.",
   );
   lines.push(
+    "For structured rich text such as headings, lists, tables, collapsible details, code blocks, or formulas, call mcp__telegram__telegram_send_rich_message with chat_id and exactly one of html or markdown.",
+  );
+  lines.push(
     "To send images or any non-text file, create or reuse a file under /workspace or /app/media, then call mcp__telegram__telegram_send_file with chat_id, file, optional caption, and optional reply_to_message_id. Images are intentionally sent as files/documents to preserve quality.",
   );
   lines.push(

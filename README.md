@@ -253,6 +253,7 @@ endpoint under both `qq` and `telegram` gives the agent natural tool names such 
 | Telegram Tool | Purpose |
 | --- | --- |
 | `telegram_send_message` | Send text with ordered text/mention parts, optional reply target, and optional topic thread id. |
+| `telegram_send_rich_message` | Send structured rich text with Telegram Rich Message HTML or Markdown. |
 | `telegram_send_file` | Send a local path, Telegram `file_id`, or HTTP URL as a document/file. Images intentionally use this tool too. |
 | `telegram_delete_message` | Delete/recall a message when Telegram permissions allow it. Requires `confirm:true`. |
 | `telegram_set_reaction` | React to a Telegram group or private message with one standard reaction emoji; the tool description lists the allowed emoji values. |
@@ -303,8 +304,23 @@ Telegram text messages use ordered `parts` for mentions:
 ]
 ```
 
+Use `telegram_send_rich_message` when a Telegram reply needs structured formatting
+such as headings, lists, tables, collapsible details, code blocks, or formulas. Pass
+exactly one of `html` or `markdown`:
+
+```json
+{
+  "chat_id": "-1001234567890",
+  "html": "<h2>Summary</h2><ul><li>Done</li><li>Next step</li></ul>",
+  "reply_to_message_id": "123",
+  "message_thread_id": "456"
+}
+```
+
 For Telegram files, call `telegram_send_file` for images and non-images alike. This sends
-through Telegram `sendDocument`, preserving the original file quality:
+through Telegram `sendDocument`, preserving the original file quality. Telegram rich
+message media blocks are intended for HTTP/HTTPS URLs; local `/workspace` and
+`/app/media` files should still be sent with `telegram_send_file`:
 
 ```json
 {
