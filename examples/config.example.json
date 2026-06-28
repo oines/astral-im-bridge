@@ -40,6 +40,15 @@
     "pollIntervalMs": 1000,
     "apiBaseUrl": "https://api.telegram.org"
   },
+  "tts": {
+    "enabled": false,
+    "apiKey": "REPLACE_WITH_TTS_API_KEY",
+    "baseUrl": "https://api.xiaomimimo.com/v1",
+    "model": "mimo-v2.5-tts",
+    "voice": "mimo_default",
+    "format": "wav",
+    "timeoutMs": 60000
+  },
   "externalEvents": {
     "enabled": true,
     "path": "/api/events",

@@ -111,6 +111,15 @@ Start from `examples/config.example.json`:
     "pollIntervalMs": 1000,
     "apiBaseUrl": "https://api.telegram.org"
   },
+  "tts": {
+    "enabled": false,
+    "apiKey": "REPLACE_WITH_TTS_API_KEY",
+    "baseUrl": "https://api.xiaomimimo.com/v1",
+    "model": "mimo-v2.5-tts",
+    "voice": "mimo_default",
+    "format": "wav",
+    "timeoutMs": 60000
+  },
   "externalEvents": {
     "enabled": true,
     "path": "/api/events",
@@ -152,6 +161,12 @@ Environment overrides:
 | `ASTRAL_BRIDGE_TELEGRAM_RECORD_UNTRIGGERED` | Store non-triggering Telegram messages from allowed chats. |
 | `ASTRAL_BRIDGE_TELEGRAM_POLL_TIMEOUT_SECONDS` | Telegram `getUpdates` long-poll timeout. |
 | `ASTRAL_BRIDGE_TELEGRAM_POLL_INTERVAL_MS` | Delay after a failed Telegram poll before retrying. |
+| `ASTRAL_BRIDGE_TTS_ENABLED` | Enable TTS-backed QQ/Telegram voice message tools. |
+| `ASTRAL_BRIDGE_TTS_API_KEY` | API key used by the TTS chat-completions endpoint. |
+| `ASTRAL_BRIDGE_TTS_BASE_URL` | TTS API base URL, default `https://api.xiaomimimo.com/v1`. |
+| `ASTRAL_BRIDGE_TTS_MODEL` | TTS model, default `mimo-v2.5-tts`. |
+| `ASTRAL_BRIDGE_TTS_VOICE` | Configured bot voice, hidden from MCP tool schemas. |
+| `ASTRAL_BRIDGE_TTS_TIMEOUT_MS` | TTS request timeout in milliseconds. |
 | `ASTRAL_BRIDGE_MCP_TRANSPORT` | `stdio` or `http`. |
 | `ASTRAL_BRIDGE_EVENT_API_ENABLED` | Enable or disable the external event API. |
 | `ASTRAL_BRIDGE_EVENT_API_PATH` | External event API path, default `/api/events`. |
@@ -232,6 +247,8 @@ endpoint under both `qq` and `telegram` gives the agent natural tool names such 
 | --- | --- |
 | `qq_send_group_message` | Send a group message with text, images, ordered parts, mentions, or a reply target. |
 | `qq_send_private_message` | Send a private message with text, images, ordered parts, or a reply target. |
+| `qq_send_group_voice` | Generate TTS audio and send it as a real QQ group voice message. |
+| `qq_send_private_voice` | Generate TTS audio and send it as a real QQ private voice message. |
 | `qq_send_group_file` | Upload a local file or URL to a QQ group. |
 | `qq_send_private_file` | Upload a local file or URL to a QQ private chat. |
 | `qq_get_unread_messages` | Return the unread batch counted by the latest inbound Astral prompt. |
@@ -254,6 +271,7 @@ endpoint under both `qq` and `telegram` gives the agent natural tool names such 
 | `telegram_send_message` | Send text with ordered text/mention parts, optional reply target, and optional topic thread id. |
 | `telegram_send_rich_message` | Send structured rich text with Telegram Rich Message HTML or Markdown. |
 | `telegram_send_file` | Send a local path, Telegram `file_id`, or HTTP URL as a document/file. Images intentionally use this tool too. |
+| `telegram_send_voice` | Generate TTS audio and send it as a real Telegram voice message. |
 | `telegram_delete_message` | Delete/recall a message when Telegram permissions allow it. Requires `confirm:true`. |
 | `telegram_set_reaction` | React to a Telegram group or private message with one standard reaction emoji; the tool description lists the allowed emoji values. |
 | `telegram_get_unread_messages` | Return the unread batch counted by the latest inbound Astral prompt. |

@@ -138,6 +138,13 @@ export interface TelegramSendFileOptions {
   messageThreadId?: string;
 }
 
+export interface TelegramSendVoiceOptions {
+  chatId: string;
+  file: string;
+  replyToMessageId?: string;
+  messageThreadId?: string;
+}
+
 export interface TelegramSendRichMessageOptions {
   chatId: string;
   html?: string;
@@ -239,6 +246,30 @@ export class TelegramClient extends EventEmitter<TelegramEvents> {
     return this.api<TelegramMessage>("sendDocument", {
       ...params,
       document: options.file,
+    });
+  }
+
+  async sendVoice(options: TelegramSendVoiceOptions): Promise<TelegramMessage> {
+    const params: Record<string, unknown> = {
+      chat_id: telegramId(options.chatId),
+      ...(options.replyToMessageId ? { reply_parameters: { message_id: telegramId(options.replyToMessageId) } } : {}),
+      ...(options.messageThreadId ? { message_thread_id: telegramId(options.messageThreadId) } : {}),
+    };
+
+    if (isLocalFile(options.file)) {
+      const form = new FormData();
+      for (const [key, value] of Object.entries(params)) {
+        form.append(key, typeof value === "object" ? JSON.stringify(value) : String(value));
+      }
+      const bytes = fs.readFileSync(options.file);
+      const blob = new Blob([new Uint8Array(bytes)], { type: "audio/wav" });
+      form.append("voice", blob, path.basename(options.file));
+      return this.apiMultipart<TelegramMessage>("sendVoice", form);
+    }
+
+    return this.api<TelegramMessage>("sendVoice", {
+      ...params,
+      voice: options.file,
     });
   }
 

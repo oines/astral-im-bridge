@@ -22,6 +22,15 @@ const defaultConfig: BridgeConfig = {
     pollIntervalMs: 1_000,
     apiBaseUrl: "https://api.telegram.org",
   },
+  tts: {
+    enabled: false,
+    apiKey: null,
+    baseUrl: "https://api.xiaomimimo.com/v1",
+    model: "mimo-v2.5-tts",
+    voice: "mimo_default",
+    format: "wav",
+    timeoutMs: 60_000,
+  },
   mcp: {
     transport: "stdio",
     host: "127.0.0.1",
@@ -93,6 +102,7 @@ function mergeConfig(base: BridgeConfig, patch: Partial<BridgeConfig>): BridgeCo
   return {
     onebot: { ...base.onebot, ...patch.onebot },
     telegram: { ...base.telegram, ...patch.telegram },
+    tts: { ...base.tts, ...patch.tts },
     mcp: { ...base.mcp, ...patch.mcp },
     astral: { ...base.astral, ...patch.astral },
     qq: { ...base.qq, ...patch.qq },
@@ -140,6 +150,14 @@ function applyEnvOverrides(config: BridgeConfig): void {
     ?? config.telegram.pollIntervalMs;
   config.telegram.apiBaseUrl =
     process.env.ASTRAL_BRIDGE_TELEGRAM_API_BASE_URL ?? config.telegram.apiBaseUrl;
+  config.tts.enabled =
+    parseBoolean(process.env.ASTRAL_BRIDGE_TTS_ENABLED) ?? config.tts.enabled;
+  config.tts.apiKey = envString("ASTRAL_BRIDGE_TTS_API_KEY") ?? config.tts.apiKey;
+  config.tts.baseUrl = envString("ASTRAL_BRIDGE_TTS_BASE_URL") ?? config.tts.baseUrl;
+  config.tts.model = envString("ASTRAL_BRIDGE_TTS_MODEL") ?? config.tts.model;
+  config.tts.voice = envString("ASTRAL_BRIDGE_TTS_VOICE") ?? config.tts.voice;
+  config.tts.timeoutMs =
+    parsePositiveInteger(process.env.ASTRAL_BRIDGE_TTS_TIMEOUT_MS) ?? config.tts.timeoutMs;
   config.mcp.transport = parseMcpTransport(process.env.ASTRAL_BRIDGE_MCP_TRANSPORT) ?? config.mcp.transport;
   config.externalEvents.enabled =
     parseBoolean(process.env.ASTRAL_BRIDGE_EVENT_API_ENABLED) ?? config.externalEvents.enabled;
@@ -178,6 +196,18 @@ function validateConfig(config: BridgeConfig): void {
   if (!config.telegram.apiBaseUrl.startsWith("http://") && !config.telegram.apiBaseUrl.startsWith("https://")) {
     throw new Error("telegram.apiBaseUrl must be an http(s) URL");
   }
+  if (config.tts.enabled && !config.tts.apiKey?.trim()) {
+    throw new Error("tts.apiKey is required when tts.enabled is true");
+  }
+  if (!config.tts.baseUrl.startsWith("http://") && !config.tts.baseUrl.startsWith("https://")) {
+    throw new Error("tts.baseUrl must be an http(s) URL");
+  }
+  if (config.tts.format !== "wav") {
+    throw new Error("tts.format must be wav");
+  }
+  if (!Number.isInteger(config.tts.timeoutMs) || config.tts.timeoutMs <= 0) {
+    throw new Error("tts.timeoutMs must be a positive integer");
+  }
   if (!Number.isInteger(config.mcp.port) || config.mcp.port <= 0) {
     throw new Error("mcp.port must be a positive integer");
   }
@@ -213,6 +243,10 @@ function validateConfig(config: BridgeConfig): void {
   config.telegram.botToken = String(config.telegram.botToken);
   config.telegram.botUsername = String(config.telegram.botUsername).replace(/^@/, "");
   config.telegram.apiBaseUrl = config.telegram.apiBaseUrl.replace(/\/+$/, "");
+  config.tts.apiKey = normalizeOptionalString(config.tts.apiKey);
+  config.tts.baseUrl = String(config.tts.baseUrl).replace(/\/+$/, "");
+  config.tts.model = String(config.tts.model).trim();
+  config.tts.voice = String(config.tts.voice).trim();
   config.astral.modelProvider = normalizeOptionalString(config.astral.modelProvider);
   config.astral.model = normalizeOptionalString(config.astral.model);
 }

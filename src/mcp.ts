@@ -21,6 +21,7 @@ import {
   TelegramClient,
   type TelegramMessage,
 } from "./telegram.js";
+import { synthesizeSpeech } from "./tts.js";
 import type { BridgeConfig, ExternalEvent, MessageSegment, SourceType, StoredAttachment, StoredMessage } from "./types.js";
 
 const QQ_SEND_DELAY_MIN_MS = 3000;
@@ -87,6 +88,11 @@ interface TelegramRichOutbound {
   content: string;
   summary: string;
   segments: MessageSegment[];
+}
+
+interface VoiceMessageOptions {
+  text: string;
+  style?: string;
 }
 
 export async function startMcpServer(
@@ -377,6 +383,88 @@ function createBridgeMcpServer(
         text: args.message,
         parts_count: message.length,
       }));
+    },
+  );
+
+  server.tool(
+    "qq_send_group_voice",
+    "Send a QQ group voice message generated from text using the configured TTS voice. This sends a real QQ voice/record message, not a file upload.",
+    {
+      group_id: z.string(),
+      text: z.string().trim().min(1).max(2_000),
+      style: z.string().trim().max(1_000).optional(),
+      reply_to_message_id: z.string().optional(),
+    },
+    async (args) => {
+      const voice = await buildVoiceMessage(config, store, {
+        text: args.text,
+        style: args.style,
+      });
+      try {
+        const sendSegments = qqVoiceSegments(voice.audioPath, args.reply_to_message_id);
+        const response = await sendQqActionWithDelay(onebot, "send_group_msg", {
+          group_id: Number(args.group_id),
+          message: sendSegments,
+        });
+        await saveOutboundMessage(config, onebot, store, {
+          sourceType: "group",
+          targetId: args.group_id,
+          action: "send_group_voice",
+          response,
+          segments: qqVoiceHistorySegments(voice, args.reply_to_message_id),
+        });
+        return structured(qqSendActionResponse(response, {
+          action: "send_group_voice",
+          target_type: "group",
+          group_id: args.group_id,
+          message_id: oneBotResponseMessageId(response),
+          reply_to_message_id: args.reply_to_message_id ?? null,
+          text: voice.text,
+        }));
+      } finally {
+        deleteTempVoiceFile(voice.audioPath);
+      }
+    },
+  );
+
+  server.tool(
+    "qq_send_private_voice",
+    "Send a QQ private voice message generated from text using the configured TTS voice. This sends a real QQ voice/record message, not a file upload.",
+    {
+      user_id: z.string(),
+      text: z.string().trim().min(1).max(2_000),
+      style: z.string().trim().max(1_000).optional(),
+      reply_to_message_id: z.string().optional(),
+    },
+    async (args) => {
+      const voice = await buildVoiceMessage(config, store, {
+        text: args.text,
+        style: args.style,
+      });
+      try {
+        const sendSegments = qqVoiceSegments(voice.audioPath, args.reply_to_message_id);
+        const response = await sendQqActionWithDelay(onebot, "send_private_msg", {
+          user_id: Number(args.user_id),
+          message: sendSegments,
+        });
+        await saveOutboundMessage(config, onebot, store, {
+          sourceType: "private",
+          targetId: args.user_id,
+          action: "send_private_voice",
+          response,
+          segments: qqVoiceHistorySegments(voice, args.reply_to_message_id),
+        });
+        return structured(qqSendActionResponse(response, {
+          action: "send_private_voice",
+          target_type: "private",
+          user_id: args.user_id,
+          message_id: oneBotResponseMessageId(response),
+          reply_to_message_id: args.reply_to_message_id ?? null,
+          text: voice.text,
+        }));
+      } finally {
+        deleteTempVoiceFile(voice.audioPath);
+      }
     },
   );
 
@@ -868,6 +956,53 @@ function registerTelegramTools(
         file: args.file,
         caption: args.caption || null,
       }));
+    },
+  );
+
+  server.tool(
+    "telegram_send_voice",
+    "Send a Telegram voice message generated from text using the configured TTS voice. This sends a real Telegram voice message via sendVoice, not a document/file.",
+    {
+      chat_id: z.string(),
+      text: z.string().trim().min(1).max(2_000),
+      style: z.string().trim().max(1_000).optional(),
+      reply_to_message_id: z.string().optional(),
+      message_thread_id: z.string().optional(),
+    },
+    async (args) => {
+      const voice = await buildVoiceMessage(config, store, {
+        text: args.text,
+        style: args.style,
+      });
+      try {
+        const response = await telegram.sendVoice({
+          chatId: args.chat_id,
+          file: voice.audioPath,
+          replyToMessageId: args.reply_to_message_id,
+          messageThreadId: args.message_thread_id,
+        });
+        await saveTelegramOutboundMessage(config, telegram, store, {
+          chatId: args.chat_id,
+          action: "sendVoice",
+          response,
+          segments: voice.historySegments,
+          replyToMessageId: args.reply_to_message_id,
+        });
+        return structured(compactActionResponse({
+          ok: true,
+          platform: "telegram",
+          action: "send_voice",
+          chat_id: args.chat_id,
+          chat_type: response.chat.type,
+          chat_title: telegramChatTitle(response),
+          message_id: String(response.message_id),
+          message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
+          reply_to_message_id: args.reply_to_message_id ?? null,
+          text: voice.text,
+        }));
+      } finally {
+        deleteTempVoiceFile(voice.audioPath);
+      }
     },
   );
 
@@ -1519,6 +1654,70 @@ function stripHtmlForPreview(value: string): string {
     .replace(/&amp;/gi, "&")
     .replace(/&quot;/gi, "\"")
     .replace(/&apos;/gi, "'");
+}
+
+async function buildVoiceMessage(
+  config: BridgeConfig,
+  store: MessageStore,
+  options: VoiceMessageOptions,
+): Promise<{
+  text: string;
+  audioPath: string;
+  historySegments: MessageSegment[];
+}> {
+  const text = options.text.trim();
+  const speech = await synthesizeSpeech(config.tts, {
+    text,
+    style: options.style,
+  });
+  const filename = `tts/${Date.now()}-${randomUUID()}${speech.extension}`;
+  const audioPath = writeMediaFile(store, filename, speech.buffer);
+  return {
+    text,
+    audioPath,
+    historySegments: voiceHistorySegments(text),
+  };
+}
+
+function qqVoiceSegments(audioPath: string, replyToMessageId?: string): MessageSegment[] {
+  const segments: MessageSegment[] = [];
+  if (replyToMessageId?.trim()) {
+    segments.push({
+      type: "reply",
+      data: { id: oneBotId(replyToMessageId) },
+    });
+  }
+  segments.push({ type: "record", data: { file: audioPath } });
+  return segments;
+}
+
+function qqVoiceHistorySegments(
+  voice: { audioPath: string; text: string; historySegments: MessageSegment[] },
+  replyToMessageId?: string,
+): MessageSegment[] {
+  if (!replyToMessageId?.trim()) {
+    return voice.historySegments;
+  }
+  return [
+    { type: "reply", data: { id: oneBotId(replyToMessageId) } },
+    ...voice.historySegments,
+  ];
+}
+
+function voiceHistorySegments(text: string): MessageSegment[] {
+  const summary = `[voice] ${truncateText(text, 500)}`;
+  return [{ type: "text", data: { text: summary } }];
+}
+
+function deleteTempVoiceFile(audioPath: string): void {
+  try {
+    fs.unlinkSync(audioPath);
+  } catch (err) {
+    warn("failed to delete temporary voice file", {
+      audioPath,
+      error: String(err),
+    });
+  }
 }
 
 function appendTelegramOutboundPart(

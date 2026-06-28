@@ -131,6 +131,17 @@ ASTRAL_MODEL=mimo-v2.5
 
 这两个值只负责告诉 bridge 发起 turn 时选哪个 provider/model；provider 本身、API key、能力声明仍由 `astral-home/config.toml` 管理。
 
+如果要开启 QQ/Telegram 语音消息工具，配置 TTS chat-completions endpoint：
+
+```env
+TTS_ENABLED=true
+TTS_API_KEY=...
+TTS_MODEL=mimo-v2.5-tts
+TTS_VOICE=mimo_default
+```
+
+`TTS_VOICE` 是 bot 的固定音色配置，不会暴露在 MCP 工具 schema 里。语音音频只作为临时文件用于发送，发送后会删除。
+
 ## 端口
 
 默认 `.env.example` 里：

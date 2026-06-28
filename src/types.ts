@@ -14,6 +14,7 @@ export type TriggerKind =
 export interface BridgeConfig {
   onebot: OneBotConfig;
   telegram: TelegramConfig;
+  tts: TtsConfig;
   mcp: McpConfig;
   astral: AstralConfig;
   qq: QqConfig;
@@ -40,6 +41,16 @@ export interface TelegramConfig {
   pollTimeoutSeconds: number;
   pollIntervalMs: number;
   apiBaseUrl: string;
+}
+
+export interface TtsConfig {
+  enabled: boolean;
+  apiKey: string | null;
+  baseUrl: string;
+  model: string;
+  voice: string;
+  format: "wav";
+  timeoutMs: number;
 }
 
 export interface McpConfig {
