@@ -21,6 +21,12 @@ import {
   TelegramClient,
   type TelegramMessage,
 } from "./telegram.js";
+import {
+  extractTelegramReplyQuote,
+  resolveTelegramReplyQuote,
+  telegramReplyQuoteSourceText,
+  type TelegramResolvedReplyQuote,
+} from "./telegram_quote.js";
 import { synthesizeSpeech } from "./tts.js";
 import type { BridgeConfig, ExternalEvent, MessageSegment, SourceType, StoredAttachment, StoredMessage } from "./types.js";
 
@@ -44,6 +50,13 @@ const telegramOutboundPartSchema = z.object({
 });
 
 type TelegramOutboundPart = z.infer<typeof telegramOutboundPartSchema>;
+
+const telegramReplyQuoteFields = {
+  reply_quote_text: z.string().max(1024).optional()
+    .describe("Exact contiguous text selected from the replied Telegram message. Requires reply_to_message_id."),
+  reply_quote_position_utf16: z.number().int().min(0).optional()
+    .describe("UTF-16 code unit offset of reply_quote_text in the replied message; only needed when the quote text appears multiple times."),
+};
 
 const externalEventSchema = z.object({
   id: z.string().trim().min(1).max(200).optional(),
@@ -93,6 +106,13 @@ interface TelegramRichOutbound {
 interface VoiceMessageOptions {
   text: string;
   style?: string;
+}
+
+interface TelegramReplyQuoteArgs {
+  chat_id: string;
+  reply_to_message_id?: string;
+  reply_quote_text?: string;
+  reply_quote_position_utf16?: number;
 }
 
 export async function startMcpServer(
@@ -824,15 +844,17 @@ function registerTelegramTools(
 
   server.tool(
     "telegram_send_message",
-    "Send a Telegram message. Supports ordered text and mention parts, topic thread ids, and replies.",
+    "Send a Telegram message. Supports ordered text and mention parts, topic thread ids, replies, and selected quote replies with reply_quote_text.",
     {
       chat_id: z.string(),
       message: z.string().default(""),
       parts: z.array(telegramOutboundPartSchema).optional(),
       reply_to_message_id: z.string().optional(),
+      ...telegramReplyQuoteFields,
       message_thread_id: z.string().optional(),
     },
     async (args) => {
+      const replyQuote = resolveTelegramMcpReplyQuote(store, args);
       const outbound = telegramOutboundText({
         message: args.message,
         parts: args.parts,
@@ -842,6 +864,8 @@ function registerTelegramTools(
         text: outbound.html,
         parseMode: "HTML",
         replyToMessageId: args.reply_to_message_id,
+        replyQuoteText: replyQuote?.text,
+        replyQuotePositionUtf16: replyQuote?.position_utf16,
         messageThreadId: args.message_thread_id,
       });
       await saveTelegramOutboundMessage(config, telegram, store, {
@@ -850,6 +874,7 @@ function registerTelegramTools(
         response,
         segments: outbound.segments,
         replyToMessageId: args.reply_to_message_id,
+        replyQuote,
       });
       return structured(compactActionResponse({
         ok: true,
@@ -861,6 +886,7 @@ function registerTelegramTools(
         message_id: String(response.message_id),
         message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
         reply_to_message_id: args.reply_to_message_id ?? null,
+        reply_quote: replyQuote,
         text: telegramPlainText(outbound.segments),
       }));
     },
@@ -868,17 +894,19 @@ function registerTelegramTools(
 
   server.tool(
     "telegram_send_rich_message",
-    "Send a Telegram rich message for structured content such as headings, lists, tables, collapsible details, code blocks, and formulas. Use telegram_send_file for local images/files.",
+    "Send a Telegram rich message for structured content such as headings, lists, tables, collapsible details, code blocks, and formulas. Supports selected quote replies with reply_quote_text. Use telegram_send_file for local images/files.",
     {
       chat_id: z.string(),
       html: z.string().optional(),
       markdown: z.string().optional(),
       reply_to_message_id: z.string().optional(),
+      ...telegramReplyQuoteFields,
       message_thread_id: z.string().optional(),
       is_rtl: z.boolean().optional(),
       skip_entity_detection: z.boolean().optional(),
     },
     async (args) => {
+      const replyQuote = resolveTelegramMcpReplyQuote(store, args);
       const outbound = telegramRichOutbound({
         html: args.html,
         markdown: args.markdown,
@@ -887,6 +915,8 @@ function registerTelegramTools(
         chatId: args.chat_id,
         ...(outbound.format === "html" ? { html: outbound.content } : { markdown: outbound.content }),
         replyToMessageId: args.reply_to_message_id,
+        replyQuoteText: replyQuote?.text,
+        replyQuotePositionUtf16: replyQuote?.position_utf16,
         messageThreadId: args.message_thread_id,
         isRtl: args.is_rtl,
         skipEntityDetection: args.skip_entity_detection,
@@ -897,6 +927,7 @@ function registerTelegramTools(
         response,
         segments: outbound.segments,
         replyToMessageId: args.reply_to_message_id,
+        replyQuote,
       });
       return structured(compactActionResponse({
         ok: true,
@@ -908,6 +939,7 @@ function registerTelegramTools(
         message_id: String(response.message_id),
         message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
         reply_to_message_id: args.reply_to_message_id ?? null,
+        reply_quote: replyQuote,
         format: outbound.format,
         summary: outbound.summary,
       }));
@@ -922,14 +954,18 @@ function registerTelegramTools(
       file: z.string(),
       caption: z.string().default(""),
       reply_to_message_id: z.string().optional(),
+      ...telegramReplyQuoteFields,
       message_thread_id: z.string().optional(),
     },
     async (args) => {
+      const replyQuote = resolveTelegramMcpReplyQuote(store, args);
       const response = await telegram.sendFile({
         chatId: args.chat_id,
         file: args.file,
         caption: args.caption,
         replyToMessageId: args.reply_to_message_id,
+        replyQuoteText: replyQuote?.text,
+        replyQuotePositionUtf16: replyQuote?.position_utf16,
         messageThreadId: args.message_thread_id,
       });
       const segments: MessageSegment[] = [
@@ -942,6 +978,7 @@ function registerTelegramTools(
         response,
         segments,
         replyToMessageId: args.reply_to_message_id,
+        replyQuote,
       });
       return structured(compactActionResponse({
         ok: true,
@@ -953,6 +990,7 @@ function registerTelegramTools(
         message_id: String(response.message_id),
         message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
         reply_to_message_id: args.reply_to_message_id ?? null,
+        reply_quote: replyQuote,
         file: args.file,
         caption: args.caption || null,
       }));
@@ -967,9 +1005,11 @@ function registerTelegramTools(
       text: z.string().trim().min(1).max(2_000),
       style: z.string().trim().max(1_000).optional(),
       reply_to_message_id: z.string().optional(),
+      ...telegramReplyQuoteFields,
       message_thread_id: z.string().optional(),
     },
     async (args) => {
+      const replyQuote = resolveTelegramMcpReplyQuote(store, args);
       const voice = await buildVoiceMessage(config, store, {
         text: args.text,
         style: args.style,
@@ -979,6 +1019,8 @@ function registerTelegramTools(
           chatId: args.chat_id,
           file: voice.audioPath,
           replyToMessageId: args.reply_to_message_id,
+          replyQuoteText: replyQuote?.text,
+          replyQuotePositionUtf16: replyQuote?.position_utf16,
           messageThreadId: args.message_thread_id,
         });
         await saveTelegramOutboundMessage(config, telegram, store, {
@@ -987,6 +1029,7 @@ function registerTelegramTools(
           response,
           segments: voice.historySegments,
           replyToMessageId: args.reply_to_message_id,
+          replyQuote,
         });
         return structured(compactActionResponse({
           ok: true,
@@ -998,6 +1041,7 @@ function registerTelegramTools(
           message_id: String(response.message_id),
           message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
           reply_to_message_id: args.reply_to_message_id ?? null,
+          reply_quote: replyQuote,
           text: voice.text,
         }));
       } finally {
@@ -1556,6 +1600,7 @@ async function saveTelegramOutboundMessage(
     response: TelegramMessage;
     segments: MessageSegment[];
     replyToMessageId?: string | null;
+    replyQuote?: TelegramResolvedReplyQuote | null;
   },
 ): Promise<void> {
   try {
@@ -1569,6 +1614,7 @@ async function saveTelegramOutboundMessage(
       action: options.action,
       response: options.response,
       replyToMessageId: options.replyToMessageId,
+      replyQuote: options.replyQuote,
     });
     store.saveMessage(stored);
     log("stored outbound telegram message", {
@@ -1636,6 +1682,43 @@ function telegramRichOutbound(options: { html?: string; markdown?: string }): Te
     summary,
     segments: [{ type: "text", data: { text: summary } }],
   };
+}
+
+function resolveTelegramMcpReplyQuote(
+  store: MessageStore,
+  args: TelegramReplyQuoteArgs,
+): TelegramResolvedReplyQuote | null {
+  if (args.reply_quote_text == null && args.reply_quote_position_utf16 == null) {
+    return null;
+  }
+  if (!args.reply_to_message_id) {
+    throw new Error("Telegram selected quote replies require reply_to_message_id");
+  }
+  if (args.reply_quote_text == null || args.reply_quote_text.trim().length === 0) {
+    throw new Error("Telegram selected quote replies require non-empty reply_quote_text");
+  }
+
+  const replied = store.getMessage(args.reply_to_message_id, "telegram", "group", args.chat_id)
+    ?? store.getMessage(args.reply_to_message_id, "telegram", "private", args.chat_id);
+  if (!replied) {
+    throw new Error(
+      `Cannot send Telegram selected quote reply: replied message ${args.reply_to_message_id} was not found in chat ${args.chat_id}`,
+    );
+  }
+
+  const sourceText = telegramReplyQuoteSourceText(replied);
+  if (!sourceText) {
+    throw new Error(
+      `Cannot send Telegram selected quote reply: replied message ${args.reply_to_message_id} has no text or caption to quote`,
+    );
+  }
+
+  try {
+    return resolveTelegramReplyQuote(sourceText, args.reply_quote_text, args.reply_quote_position_utf16);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Cannot send Telegram selected quote reply: ${message}`);
+  }
 }
 
 function richMessagePreview(content: string, format: "html" | "markdown"): string {
@@ -2077,6 +2160,7 @@ function compactStoredMessageOrNull(message: StoredMessage | null): Record<strin
 }
 
 function compactStoredMessage(message: StoredMessage): Record<string, unknown> {
+  const replyQuote = message.platform === "telegram" ? extractTelegramReplyQuote(message.rawEvent) : null;
   return {
     id: message.id,
     platform: message.platform,
@@ -2095,6 +2179,7 @@ function compactStoredMessage(message: StoredMessage): Record<string, unknown> {
     raw_message: truncateText(sanitizeCqMessage(message.rawMessage), 500),
     trigger: message.trigger,
     reply_to_message_id: message.replyToMessageId,
+    reply_quote: replyQuote,
     reply_to_message: message.replyToMessage
       ? {
           id: message.replyToMessage.id,
@@ -2126,6 +2211,7 @@ function replyMessageSummaries(messages: Record<string, unknown>[]): Record<stri
         sender_display_name: message.sender_display_name,
         text: message.text,
         reply_to_message_id: message.reply_to_message_id,
+        reply_quote: message.reply_quote ?? null,
         reply_to_sender_display_name: reply?.sender_display_name ?? null,
         reply_to_text: reply?.text ?? null,
       };

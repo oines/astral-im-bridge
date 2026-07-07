@@ -12,6 +12,7 @@ import type {
   TriggerKind,
 } from "./types.js";
 import { QQ_REACTION_EMOJI_IDS, TELEGRAM_REACTION_EMOJIS } from "./reactions.js";
+import { extractTelegramReplyQuote } from "./telegram_quote.js";
 
 interface OutboundStoredMessageOptions {
   platform: Platform;
@@ -518,6 +519,17 @@ function buildTelegramAstralPrompt(message: StoredMessage): string {
   lines.push(`trigger: ${message.trigger}`);
   if (message.replyToMessageId) {
     lines.push(`reply_to_message_id: ${message.replyToMessageId}`);
+    const quote = extractTelegramReplyQuote(message.rawEvent);
+    if (quote) {
+      lines.push("reply_quote:");
+      lines.push(`text: ${quote.text}`);
+      if (quote.position_utf16 != null) {
+        lines.push(`position_utf16: ${quote.position_utf16}`);
+      }
+      if (quote.is_manual != null) {
+        lines.push(`is_manual: ${quote.is_manual}`);
+      }
+    }
   }
 
   if (message.conversationUnread) {
@@ -570,7 +582,7 @@ function buildTelegramAstralPrompt(message: StoredMessage): string {
     "Normally reply to this Telegram message by calling a Telegram MCP send tool in the same chat it came from. Do not only output plain text: plain text is not sent to Telegram, so the sender will not see it.",
   );
   lines.push(
-    "For text replies call mcp__telegram__telegram_send_message with chat_id and optional reply_to_message_id. If message_thread_id is present, pass it so the reply stays in the same topic.",
+    "For text replies call mcp__telegram__telegram_send_message with chat_id and optional reply_to_message_id. If this inbound message has reply_quote and you want to quote the same selected text, pass reply_quote_text and usually let the bridge infer reply_quote_position_utf16. If message_thread_id is present, pass it so the reply stays in the same topic.",
   );
   lines.push(
     "For structured rich text such as headings, lists, tables, collapsible details, code blocks, or formulas, call mcp__telegram__telegram_send_rich_message with chat_id and exactly one of html or markdown.",

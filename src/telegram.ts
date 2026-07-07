@@ -14,6 +14,7 @@ import type {
   TelegramConfig,
   TriggerKind,
 } from "./types.js";
+import type { TelegramResolvedReplyQuote } from "./telegram_quote.js";
 import type { MessageStore } from "./store.js";
 
 export interface TelegramUser {
@@ -50,6 +51,13 @@ export interface TelegramMessageEntity {
   [key: string]: unknown;
 }
 
+export interface TelegramTextQuote {
+  text: string;
+  entities?: TelegramMessageEntity[];
+  position?: number;
+  is_manual?: boolean;
+}
+
 export interface TelegramDocument {
   file_id: string;
   file_unique_id?: string;
@@ -78,6 +86,7 @@ export interface TelegramMessage {
   entities?: TelegramMessageEntity[];
   caption_entities?: TelegramMessageEntity[];
   reply_to_message?: TelegramMessage;
+  quote?: TelegramTextQuote;
   document?: TelegramDocument;
   animation?: TelegramDocument;
   audio?: TelegramDocument;
@@ -127,6 +136,8 @@ export interface TelegramSendMessageOptions {
   text: string;
   parseMode?: "HTML";
   replyToMessageId?: string;
+  replyQuoteText?: string;
+  replyQuotePositionUtf16?: number;
   messageThreadId?: string;
 }
 
@@ -135,6 +146,8 @@ export interface TelegramSendFileOptions {
   file: string;
   caption?: string;
   replyToMessageId?: string;
+  replyQuoteText?: string;
+  replyQuotePositionUtf16?: number;
   messageThreadId?: string;
 }
 
@@ -142,6 +155,8 @@ export interface TelegramSendVoiceOptions {
   chatId: string;
   file: string;
   replyToMessageId?: string;
+  replyQuoteText?: string;
+  replyQuotePositionUtf16?: number;
   messageThreadId?: string;
 }
 
@@ -150,9 +165,17 @@ export interface TelegramSendRichMessageOptions {
   html?: string;
   markdown?: string;
   replyToMessageId?: string;
+  replyQuoteText?: string;
+  replyQuotePositionUtf16?: number;
   messageThreadId?: string;
   isRtl?: boolean;
   skipEntityDetection?: boolean;
+}
+
+export interface TelegramReplyParametersOptions {
+  replyToMessageId?: string;
+  replyQuoteText?: string;
+  replyQuotePositionUtf16?: number;
 }
 
 export interface TelegramSetReactionOptions {
@@ -215,20 +238,22 @@ export class TelegramClient extends EventEmitter<TelegramEvents> {
   }
 
   async sendMessage(options: TelegramSendMessageOptions): Promise<TelegramMessage> {
+    const replyParameters = buildTelegramReplyParameters(options);
     return this.api<TelegramMessage>("sendMessage", {
       chat_id: telegramId(options.chatId),
       text: options.text,
       ...(options.parseMode ? { parse_mode: options.parseMode } : {}),
-      ...(options.replyToMessageId ? { reply_parameters: { message_id: telegramId(options.replyToMessageId) } } : {}),
+      ...(replyParameters ? { reply_parameters: replyParameters } : {}),
       ...(options.messageThreadId ? { message_thread_id: telegramId(options.messageThreadId) } : {}),
     });
   }
 
   async sendFile(options: TelegramSendFileOptions): Promise<TelegramMessage> {
+    const replyParameters = buildTelegramReplyParameters(options);
     const params: Record<string, unknown> = {
       chat_id: telegramId(options.chatId),
       ...(options.caption ? { caption: options.caption } : {}),
-      ...(options.replyToMessageId ? { reply_parameters: { message_id: telegramId(options.replyToMessageId) } } : {}),
+      ...(replyParameters ? { reply_parameters: replyParameters } : {}),
       ...(options.messageThreadId ? { message_thread_id: telegramId(options.messageThreadId) } : {}),
     };
 
@@ -250,9 +275,10 @@ export class TelegramClient extends EventEmitter<TelegramEvents> {
   }
 
   async sendVoice(options: TelegramSendVoiceOptions): Promise<TelegramMessage> {
+    const replyParameters = buildTelegramReplyParameters(options);
     const params: Record<string, unknown> = {
       chat_id: telegramId(options.chatId),
-      ...(options.replyToMessageId ? { reply_parameters: { message_id: telegramId(options.replyToMessageId) } } : {}),
+      ...(replyParameters ? { reply_parameters: replyParameters } : {}),
       ...(options.messageThreadId ? { message_thread_id: telegramId(options.messageThreadId) } : {}),
     };
 
@@ -274,6 +300,7 @@ export class TelegramClient extends EventEmitter<TelegramEvents> {
   }
 
   async sendRichMessage(options: TelegramSendRichMessageOptions): Promise<TelegramMessage> {
+    const replyParameters = buildTelegramReplyParameters(options);
     const richMessage: Record<string, unknown> = {
       ...(options.html ? { html: options.html } : {}),
       ...(options.markdown ? { markdown: options.markdown } : {}),
@@ -284,7 +311,7 @@ export class TelegramClient extends EventEmitter<TelegramEvents> {
     return this.api<TelegramMessage>("sendRichMessage", {
       chat_id: telegramId(options.chatId),
       rich_message: richMessage,
-      ...(options.replyToMessageId ? { reply_parameters: { message_id: telegramId(options.replyToMessageId) } } : {}),
+      ...(replyParameters ? { reply_parameters: replyParameters } : {}),
       ...(options.messageThreadId ? { message_thread_id: telegramId(options.messageThreadId) } : {}),
     });
   }
@@ -534,6 +561,7 @@ export function buildTelegramOutboundMessage(options: {
   action: string;
   response: unknown;
   replyToMessageId?: string | null;
+  replyQuote?: TelegramResolvedReplyQuote | null;
 }): StoredMessage {
   const sourceType: SourceType = options.message.chat.type === "private" ? "private" : "group";
   return {
@@ -557,8 +585,22 @@ export function buildTelegramOutboundMessage(options: {
       bridge_outbound: true,
       action: options.action,
       response: options.response,
+      ...(options.replyQuote ? { bridge_reply_quote: options.replyQuote } : {}),
     },
     attachments: telegramAttachments(options.message),
+  };
+}
+
+export function buildTelegramReplyParameters(
+  options: TelegramReplyParametersOptions,
+): Record<string, unknown> | null {
+  if (!options.replyToMessageId) {
+    return null;
+  }
+  return {
+    message_id: telegramId(options.replyToMessageId),
+    ...(options.replyQuoteText == null ? {} : { quote: options.replyQuoteText }),
+    ...(options.replyQuotePositionUtf16 == null ? {} : { quote_position: options.replyQuotePositionUtf16 }),
   };
 }
 
