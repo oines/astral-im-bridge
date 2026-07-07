@@ -340,7 +340,7 @@ function createBridgeMcpServer(
         group_id: args.group_id,
         message_id: oneBotResponseMessageId(response),
         reply_to_message_id: args.reply_to_message_id ?? null,
-        text: args.message,
+        text: "消息已送达",
         parts_count: message.length,
       }));
     },
@@ -380,7 +380,7 @@ function createBridgeMcpServer(
         user_id: args.user_id,
         message_id: oneBotResponseMessageId(response),
         reply_to_message_id: args.reply_to_message_id ?? null,
-        text: args.message,
+        text: "消息已送达",
         parts_count: message.length,
       }));
     },
@@ -531,6 +531,41 @@ function createBridgeMcpServer(
   );
 
   registerGroupAdminTools(server, config, onebot);
+
+  server.tool(
+    "query_messages",
+    "Execute a read-only SQL query against the unified message database (QQ + Telegram). Only SELECT/WITH queries allowed. Schema: messages(id, platform, platform_message_id, source_type, target_id, group_id, group_name, user_id, nickname, group_card, role, time, text, raw_message, trigger, reply_to_message_id) and attachments(id, message_row_id, kind, file_id, name, url, path, mime_type, size).",
+    {
+      sql: z.string().min(1).max(5000).describe("SQL SELECT query to execute"),
+      max_rows: z.number().int().min(1).max(500).default(100).describe("Maximum number of rows to return"),
+    },
+    async (args) => {
+      try {
+        const result = store.executeQuery(args.sql, args.max_rows);
+        const compact = JSON.stringify({
+          columns: result.columns,
+          rows: result.rows,
+          returned_count: result.returned_count,
+          truncated: result.truncated,
+        });
+        return {
+          content: [{
+            type: "text" as const,
+            text: compact,
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Query error: ${err instanceof Error ? err.message : String(err)}`,
+          }],
+          isError: true,
+        };
+      }
+    },
+  );
+
   if (telegram) {
     registerTelegramTools(server, config, telegram, store);
   }
@@ -861,7 +896,7 @@ function registerTelegramTools(
         message_id: String(response.message_id),
         message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
         reply_to_message_id: args.reply_to_message_id ?? null,
-        text: telegramPlainText(outbound.segments),
+        text: "消息已送达",
       }));
     },
   );
