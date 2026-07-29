@@ -1,7 +1,7 @@
 # Astral Bridge
 
 Astral Bridge connects QQ, through NapCat's OneBot v11 reverse WebSocket, and optionally
-Telegram, through the Telegram Bot API, to one fixed Astral Code app-server session. It
+Telegram, through the Telegram Bot API, to one long-lived Astral Code app-server session. It
 also exposes MCP tools so the agent can reply back to chat platforms, send files, mention
 people, recall/delete messages, and fetch recent conversation context when needed.
 
@@ -12,17 +12,17 @@ with QQ, Tencent, NapCat, OneBot, Telegram, or Astral Code.
 
 - Receive QQ private and group messages from NapCat over OneBot v11.
 - Receive Telegram private, group, supergroup, and channel-post messages through long polling.
-- Route every accepted message into one configured Astral app-server thread.
+- Route every accepted message into one Astral app-server thread, either configured explicitly or auto-created on first startup.
 - Trigger group messages only when the bot is mentioned, replied to, or the chat is configured
   as always-trigger.
 - Trigger every message from configured private QQ or Telegram users/chats.
 - Store allowed conversation history locally in SQLite for later MCP lookups.
 - Include compact inbound context: platform, chat/group name/id, sender id, nickname,
   username/card, message id, reply id, trigger kind, unread count, and attachment metadata.
-- Support app-server `turn/steer` when the fixed Astral thread already has an active turn.
+- Support app-server `turn/steer` when the current Astral thread already has an active turn.
 - Expose Streamable HTTP or stdio MCP tools for QQ and Telegram replies, history, media,
   files, mentions, and replies to specific message ids.
-- Accept generic external event webhooks and forward them into the fixed Astral session.
+- Accept generic external event webhooks and forward them into the current Astral session.
 - Expose a read-only Web UI for connection status, routing, recent messages,
   recent conversations, and recent bridge logs.
 - Add a random 3-5 second delay before outbound QQ send actions.
@@ -85,11 +85,13 @@ Start from `examples/config.example.json`:
   "astral": {
     "appServerUrl": "ws://127.0.0.1:4222",
     "authToken": null,
-    "threadId": "REPLACE_WITH_FIXED_ASTRAL_THREAD_ID",
+    "threadId": "auto",
     "cwd": null,
+    "modelConfigPath": null,
     "modelProvider": null,
     "model": null,
-    "includeImageInputs": false
+    "includeImageInputs": false,
+    "rotateThreadOnStart": false
   },
   "qq": {
     "botUserId": "REPLACE_WITH_BOT_QQ",
@@ -144,9 +146,11 @@ Environment overrides:
 | `ASTRAL_BRIDGE_CONFIG` | Path to the JSON config file. |
 | `ASTRAL_BRIDGE_APP_SERVER_URL` | Astral app-server WebSocket URL. |
 | `ASTRAL_BRIDGE_APP_SERVER_AUTH_TOKEN` | Bearer token for Astral app-server. |
-| `ASTRAL_BRIDGE_THREAD_ID` | Fixed Astral thread/session id. |
-| `ASTRAL_BRIDGE_MODEL_PROVIDER` | Optional provider override for new turns and resumed fixed-thread settings. |
-| `ASTRAL_BRIDGE_MODEL` | Optional model override for new turns and resumed fixed-thread settings. |
+| `ASTRAL_BRIDGE_THREAD_ID` | Optional fixed Astral thread/session id. Leave empty or set `auto` to let bridge create and persist one in its SQLite store. |
+| `ASTRAL_BRIDGE_ROTATE_THREAD_ON_START` | Auto-managed mode only. Set `true` once to create a fresh thread on bridge startup, then set it back to `false`. |
+| `ASTRAL_BRIDGE_MODEL_CONFIG_PATH` | Optional Astral `config.toml` path. When set, bridge reads `model_provider` and `model` from this file before new turns and syncs the current thread settings. |
+| `ASTRAL_BRIDGE_MODEL_PROVIDER` | Optional static provider override when `modelConfigPath` is not set. |
+| `ASTRAL_BRIDGE_MODEL` | Optional static model override when `modelConfigPath` is not set. |
 | `ASTRAL_BRIDGE_BOT_QQ` | Bot QQ user id. |
 | `ASTRAL_BRIDGE_ALLOWED_GROUP_IDS` | Comma-separated allowed group ids. |
 | `ASTRAL_BRIDGE_ALWAYS_TRIGGER_GROUP_IDS` | Comma-separated group ids where every non-bot message is forwarded to Astral. |
@@ -174,6 +178,12 @@ Environment overrides:
 | `ASTRAL_BRIDGE_EVENT_API_DEBOUNCE_MS` | Window used to merge attention-worthy external events before forwarding to Astral. |
 | `ASTRAL_BRIDGE_EVENT_API_MAX_BATCH_EVENTS` | Maximum external events included in one merged Astral turn. Extra events in the same window are counted and omitted. |
 | `ASTRAL_BRIDGE_EVENT_API_MAX_BATCH_BODY_CHARS` | Maximum merged event body characters sent to Astral. Longer batches are truncated. |
+
+When `astral.threadId` / `ASTRAL_BRIDGE_THREAD_ID` is empty or `auto`, bridge creates one
+Astral thread on first use and stores the id in SQLite `store_meta`. To rotate an
+auto-managed thread manually, call `POST /api/astral/thread/rotate` with the same bearer
+token as the external event API. If a turn is currently active, the endpoint returns `409`
+instead of interrupting it.
 
 `recordUntriggered` controls whether non-triggering messages from allowed conversations
 are stored. Keeping it enabled lets the agent fetch surrounding context without forwarding
@@ -403,7 +413,7 @@ Content-Type: application/json
 ```
 
 The bridge queues attention-worthy events, merges short bursts into one bounded Astral
-turn, and submits that merged event to the fixed Astral thread using the same queue as QQ
+turn, and submits that merged event to the current Astral thread using the same queue as QQ
 messages. Set `wants_agent_attention` to `false` to validate and accept an event without
 forwarding it into Astral. Batching is controlled by `externalEvents.debounceMs`,
 `externalEvents.maxBatchEvents`, and `externalEvents.maxBatchBodyChars`.
@@ -434,7 +444,7 @@ The bridge talks to Astral app-server over WebSocket and uses:
 - `initialize`
 - `thread/resume`
 - `turn/start`
-- `turn/steer` when the fixed thread already has an active turn
+- `turn/steer` when the current thread already has an active turn
 
 When starting a turn, the bridge requests `approvalPolicy = "never"` and
 `sandboxPolicy = { type = "dangerFullAccess" }`. If you use this mode, isolate Astral at

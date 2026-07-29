@@ -65,9 +65,11 @@ export interface AstralConfig {
   authToken: string | null;
   threadId: string;
   cwd: string | null;
+  modelConfigPath: string | null;
   modelProvider: string | null;
   model: string | null;
   includeImageInputs: boolean;
+  rotateThreadOnStart: boolean;
 }
 
 export interface QqConfig {

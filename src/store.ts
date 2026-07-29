@@ -42,6 +42,14 @@ export class MessageStore {
     this.migrate();
   }
 
+  getMetaValue(key: string): string | null {
+    return this.metaValue(key);
+  }
+
+  setMetaValue(key: string, value: string): void {
+    this.writeMetaValue(key, value);
+  }
+
   saveMessage(message: StoredMessage): number {
     const insert = this.db.prepare(`
       INSERT INTO messages (
@@ -700,7 +708,7 @@ export class MessageStore {
     return row?.value ?? null;
   }
 
-  private setMetaValue(key: string, value: string): void {
+  private writeMetaValue(key: string, value: string): void {
     this.db
       .prepare("INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
       .run(key, value);
@@ -714,7 +722,7 @@ export class MessageStore {
       }
       this.createMessageFtsTable();
       this.rebuildMessageFtsIndex();
-      this.setMetaValue(MESSAGES_FTS_META_KEY, MESSAGES_FTS_INDEX_VERSION);
+      this.writeMetaValue(MESSAGES_FTS_META_KEY, MESSAGES_FTS_INDEX_VERSION);
       return;
     }
     this.createMessageFtsTable();

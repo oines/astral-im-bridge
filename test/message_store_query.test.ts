@@ -56,6 +56,18 @@ test("queryMessagesAdvanced returns columns and rows for a simple SELECT", () =>
   assert.equal(result.truncated, false);
 });
 
+test("MessageStore persists bridge metadata", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "astral-bridge-store-"));
+  const store = createStoreAt(dir);
+
+  assert.equal(store.getMetaValue("astral_thread_id"), null);
+  store.setMetaValue("astral_thread_id", "thread-1");
+  assert.equal(store.getMetaValue("astral_thread_id"), "thread-1");
+
+  const reopened = createStoreAt(dir);
+  assert.equal(reopened.getMetaValue("astral_thread_id"), "thread-1");
+});
+
 test("queryMessagesAdvanced allows semicolons inside SQL string literals", () => {
   const store = createStore();
   const result = store.queryMessagesAdvanced("SELECT ';' AS semicolon;");

@@ -1,7 +1,7 @@
 {
   "name": "astral-bridge",
   "version": "0.1.0",
-  "description": "QQ/NapCat OneBot v11 bridge for a fixed Astral Code app-server session with MCP tools.",
+  "description": "QQ/NapCat OneBot v11 bridge for a long-lived Astral Code app-server session with MCP tools.",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {

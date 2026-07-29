@@ -1,10 +1,17 @@
 import { EventEmitter } from "node:events";
+import fs from "node:fs/promises";
 import WebSocket from "ws";
 import { error, log, warn } from "./logger.js";
 import type { AstralConfig, ExternalEvent, StoredMessage } from "./types.js";
 import { buildAstralPrompt, buildExternalEventPrompt } from "./message.js";
+import type { MessageStore } from "./store.js";
 
 type RequestId = string;
+type ThreadIdSource = "config" | "store_auto" | "created_auto" | "none";
+
+const AUTO_THREAD_ID_META_KEY = "astral_thread_id";
+const THREAD_HISTORY_META_KEY = "astral_thread_history";
+const THREAD_HISTORY_LIMIT = 20;
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -32,9 +39,27 @@ interface CompactStatus {
   startedAtMs: number | null;
 }
 
+interface ModelSettings {
+  modelProvider: string | null;
+  model: string | null;
+  reasoningEffort: string | null;
+  source: "astral_config" | "bridge_config" | "none";
+  path: string | null;
+  error: string | null;
+}
+
 export interface InterruptActiveTurnResult {
   interrupted: boolean;
   turnId: string | null;
+}
+
+export interface RotateThreadResult {
+  rotated: boolean;
+  threadId: string | null;
+  previousThreadId: string | null;
+  threadIdSource: ThreadIdSource;
+  activeTurnId: string | null;
+  reason: string;
 }
 
 export class AstralAppServerClient extends EventEmitter {
@@ -44,12 +69,21 @@ export class AstralAppServerClient extends EventEmitter {
   private connectPromise: Promise<void> | null = null;
   private submissionQueue: Promise<void> = Promise.resolve();
   private resumed = false;
+  private canUpdateThreadSettings = false;
   private activeTurnId: string | null = null;
   private modelSettingsSynced = false;
+  private syncedModelSettingsKey: string | null = null;
+  private modelSettingsStatus: ModelSettings = emptyModelSettings("none");
   private tokenUsage: ThreadTokenUsage | null = null;
   private compactStatus: CompactStatus = idleCompactStatus();
+  private resolvedThreadId: string | null = null;
+  private threadIdSource: ThreadIdSource = "none";
+  private rotateThreadOnStartConsumed = false;
 
-  constructor(private readonly config: AstralConfig) {
+  constructor(
+    private readonly config: AstralConfig,
+    private readonly store: MessageStore,
+  ) {
     super();
   }
 
@@ -68,6 +102,7 @@ export class AstralAppServerClient extends EventEmitter {
   async interruptActiveTurn(): Promise<InterruptActiveTurnResult> {
     await this.ensureThread();
     await this.refreshActiveTurn();
+    const threadId = this.currentThreadId();
 
     const turnId = this.activeTurnId;
     if (!turnId) {
@@ -75,14 +110,14 @@ export class AstralAppServerClient extends EventEmitter {
     }
 
     await this.request("turn/interrupt", {
-      threadId: this.config.threadId,
+      threadId,
       turnId,
     });
     if (this.activeTurnId === turnId) {
       this.activeTurnId = null;
     }
     log("interrupted astral turn", {
-      threadId: this.config.threadId,
+      threadId,
       turnId,
     });
     return { interrupted: true, turnId };
@@ -92,15 +127,72 @@ export class AstralAppServerClient extends EventEmitter {
     await this.ensureThread();
   }
 
+  async rotateThread(reason = "manual"): Promise<RotateThreadResult> {
+    if (this.config.threadId) {
+      throw new Error("Astral thread is config-managed; clear astral.threadId to use auto thread rotation");
+    }
+
+    await this.ensureConnected();
+    const storedThreadId = normalizeThreadId(this.store.getMetaValue(AUTO_THREAD_ID_META_KEY));
+    if (!this.resolvedThreadId && storedThreadId) {
+      this.resolvedThreadId = storedThreadId;
+      this.threadIdSource = "store_auto";
+    }
+    if (this.resolvedThreadId) {
+      await this.refreshActiveTurn();
+    }
+    if (this.activeTurnId) {
+      return {
+        rotated: false,
+        threadId: this.resolvedThreadId,
+        previousThreadId: this.resolvedThreadId,
+        threadIdSource: this.threadIdSource,
+        activeTurnId: this.activeTurnId,
+        reason,
+      };
+    }
+
+    const previousThreadId = this.resolvedThreadId ?? storedThreadId;
+    const newThreadId = await this.createAutoThread(reason);
+    this.store.setMetaValue(AUTO_THREAD_ID_META_KEY, newThreadId);
+    this.recordThreadHistory(previousThreadId, newThreadId, reason);
+    this.resolvedThreadId = newThreadId;
+    this.threadIdSource = "created_auto";
+    this.rotateThreadOnStartConsumed = true;
+    this.resumed = true;
+    this.activeTurnId = null;
+    log("rotated astral auto thread", {
+      previousThreadId,
+      threadId: newThreadId,
+      reason,
+    });
+    return {
+      rotated: true,
+      threadId: newThreadId,
+      previousThreadId,
+      threadIdSource: this.threadIdSource,
+      activeTurnId: null,
+      reason,
+    };
+  }
+
   status(): Record<string, unknown> {
     return {
       connected: this.socket?.readyState === WebSocket.OPEN,
       resumed: this.resumed,
       activeTurnId: this.activeTurnId,
       pendingRequests: this.pending.size,
-      threadId: this.config.threadId,
-      modelProvider: this.config.modelProvider,
-      model: this.config.model,
+      threadId: (this.resolvedThreadId ?? this.config.threadId) || null,
+      configuredThreadId: this.config.threadId || null,
+      threadIdSource: this.threadIdSource,
+      autoThreadManaged: !this.config.threadId,
+      rotateThreadOnStart: this.config.rotateThreadOnStart,
+      modelProvider: this.modelSettingsStatus.modelProvider,
+      model: this.modelSettingsStatus.model,
+      reasoningEffort: this.modelSettingsStatus.reasoningEffort,
+      modelSettingsSource: this.modelSettingsStatus.source,
+      modelConfigPath: this.modelSettingsStatus.path ?? this.config.modelConfigPath,
+      modelSettingsError: this.modelSettingsStatus.error,
       modelSettingsSynced: this.modelSettingsSynced,
       tokenUsage: this.tokenUsage,
       contextWindow: contextWindowStatus(this.tokenUsage),
@@ -128,16 +220,17 @@ export class AstralAppServerClient extends EventEmitter {
     input: Array<Record<string, unknown>>,
     logId: string,
   ): Promise<void> {
+    const threadId = this.currentThreadId();
     if (this.activeTurnId) {
       try {
         await this.request("turn/steer", {
-          threadId: this.config.threadId,
+          threadId,
           clientUserMessageId,
           input,
           expectedTurnId: this.activeTurnId,
         });
         log("steered active astral turn", {
-          threadId: this.config.threadId,
+          threadId,
           turnId: this.activeTurnId,
           messageId: logId,
         });
@@ -148,18 +241,29 @@ export class AstralAppServerClient extends EventEmitter {
       }
     }
 
+    const modelSettings = this.canUpdateThreadSettings
+      ? await this.syncThreadModelSettings()
+      : await this.resolveModelSettings();
     const response = await this.request<{ turn?: { id?: string } }>("turn/start", {
-      threadId: this.config.threadId,
+      threadId,
       clientUserMessageId,
       input,
       approvalPolicy: "never",
       sandboxPolicy: { type: "dangerFullAccess" },
       ...(this.config.cwd ? { cwd: this.config.cwd } : {}),
-      ...this.modelSettingsParams(),
+      ...modelSettingsParams(modelSettings),
     });
+    this.canUpdateThreadSettings = true;
+    if (hasModelSettings(modelSettings)) {
+      this.syncedModelSettingsKey = modelSettingsKey(modelSettings);
+      this.modelSettingsSynced = true;
+    } else {
+      this.syncedModelSettingsKey = modelSettingsKey(modelSettings);
+      this.modelSettingsSynced = modelSettings.error === null;
+    }
     this.activeTurnId = response.turn?.id ?? null;
     log("started astral turn", {
-      threadId: this.config.threadId,
+      threadId,
       turnId: this.activeTurnId,
       messageId: logId,
     });
@@ -167,37 +271,143 @@ export class AstralAppServerClient extends EventEmitter {
 
   private async ensureThread(): Promise<void> {
     await this.ensureConnected();
+    const threadId = await this.ensureResolvedThreadId();
     if (this.resumed) {
       return;
     }
     try {
       await this.request("thread/resume", {
-        threadId: this.config.threadId,
+        threadId,
         excludeTurns: true,
       });
     } catch (err) {
       if (!isMissingRolloutError(err)) {
         throw err;
       }
-      warn("fixed astral thread has no rollout yet; starting first turn without resume", {
-        threadId: this.config.threadId,
+      warn("astral thread has no rollout yet; starting first turn without resume", {
+        threadId,
         error: String(err),
       });
       this.resumed = true;
-      this.modelSettingsSynced = !this.hasModelSettings();
+      this.canUpdateThreadSettings = false;
+      this.modelSettingsSynced = false;
       return;
     }
     this.resumed = true;
+    this.canUpdateThreadSettings = true;
     await this.refreshActiveTurn();
     await this.syncThreadModelSettings();
   }
 
+  private async ensureResolvedThreadId(): Promise<string> {
+    if (this.config.threadId) {
+      this.resolvedThreadId = this.config.threadId;
+      this.threadIdSource = "config";
+      return this.config.threadId;
+    }
+
+    const shouldRotateOnStart = this.config.rotateThreadOnStart && !this.rotateThreadOnStartConsumed;
+    if (this.resolvedThreadId && !shouldRotateOnStart) {
+      return this.resolvedThreadId;
+    }
+
+    const storedThreadId = normalizeThreadId(this.store.getMetaValue(AUTO_THREAD_ID_META_KEY));
+    if (storedThreadId && !shouldRotateOnStart) {
+      this.resolvedThreadId = storedThreadId;
+      this.threadIdSource = "store_auto";
+      return storedThreadId;
+    }
+
+    const previousThreadId = this.resolvedThreadId ?? storedThreadId;
+    const reason = shouldRotateOnStart ? "rotate_on_start" : "auto_onboarding";
+    const newThreadId = await this.createAutoThread(reason);
+    this.store.setMetaValue(AUTO_THREAD_ID_META_KEY, newThreadId);
+    this.recordThreadHistory(previousThreadId, newThreadId, reason);
+    this.resolvedThreadId = newThreadId;
+    this.threadIdSource = "created_auto";
+    this.rotateThreadOnStartConsumed = true;
+    this.resumed = true;
+    log("created astral auto thread", {
+      previousThreadId,
+      threadId: newThreadId,
+      reason,
+    });
+    return newThreadId;
+  }
+
+  private async createAutoThread(reason: string): Promise<string> {
+    const modelSettings = await this.resolveModelSettings();
+    const response = await this.request<{ thread?: { id?: string } }>("thread/start", {
+      ...(this.config.cwd ? { cwd: this.config.cwd } : {}),
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+      ephemeral: false,
+      ...threadStartModelSettingsParams(modelSettings),
+    });
+    const threadId = response.thread?.id;
+    if (!threadId) {
+      throw new Error("thread/start did not return thread.id");
+    }
+    this.canUpdateThreadSettings = true;
+    this.modelSettingsSynced = modelSettings.error === null && !modelSettings.reasoningEffort;
+    this.syncedModelSettingsKey = this.modelSettingsSynced ? modelSettingsKey(modelSettings) : null;
+    this.activeTurnId = null;
+    log("started astral auto thread", {
+      threadId,
+      reason,
+      modelProvider: modelSettings.modelProvider,
+      model: modelSettings.model,
+      reasoningEffort: modelSettings.reasoningEffort,
+      source: modelSettings.source,
+      path: modelSettings.path,
+    });
+    return threadId;
+  }
+
+  private currentThreadId(): string {
+    const threadId = this.resolvedThreadId ?? this.config.threadId;
+    if (!threadId) {
+      throw new Error("Astral thread is not initialized");
+    }
+    return threadId;
+  }
+
+  private recordThreadHistory(
+    previousThreadId: string | null,
+    newThreadId: string,
+    reason: string,
+  ): void {
+    if (!previousThreadId || previousThreadId === newThreadId) {
+      return;
+    }
+    const raw = this.store.getMetaValue(THREAD_HISTORY_META_KEY);
+    let history: Array<Record<string, unknown>> = [];
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          history = parsed.filter(isRecord);
+        }
+      } catch (err) {
+        warn("ignored malformed astral thread history", { error: String(err) });
+      }
+    }
+    history.unshift({
+      previousThreadId,
+      newThreadId,
+      reason,
+      rotatedAt: new Date().toISOString(),
+    });
+    this.store.setMetaValue(THREAD_HISTORY_META_KEY, JSON.stringify(history.slice(0, THREAD_HISTORY_LIMIT)));
+  }
+
   private async refreshActiveTurn(): Promise<void> {
     try {
+      const threadId = this.currentThreadId();
       const response = await this.request<{ data?: Array<{ id: string; status: string }> }>(
         "thread/turns/list",
         {
-          threadId: this.config.threadId,
+          threadId,
           limit: 1,
           sortDirection: "desc",
           itemsView: "notLoaded",
@@ -236,38 +446,82 @@ export class AstralAppServerClient extends EventEmitter {
     return input;
   }
 
-  private modelSettingsParams(): Record<string, string> {
-    const params: Record<string, string> = {};
-    if (this.config.modelProvider) {
-      params.modelProvider = this.config.modelProvider;
+  private async resolveModelSettings(): Promise<ModelSettings> {
+    if (this.config.modelConfigPath) {
+      const modelSettings = await this.resolveModelSettingsFromFile(this.config.modelConfigPath);
+      this.modelSettingsStatus = modelSettings;
+      return modelSettings;
     }
-    if (this.config.model) {
-      params.model = this.config.model;
-    }
-    return params;
+
+    const modelSettings = normalizeModelSettings({
+      modelProvider: this.config.modelProvider,
+      model: this.config.model,
+      reasoningEffort: null,
+      source: this.config.modelProvider || this.config.model ? "bridge_config" : "none",
+      path: null,
+      error: null,
+    });
+    this.modelSettingsStatus = modelSettings;
+    return modelSettings;
   }
 
-  private hasModelSettings(): boolean {
-    return Boolean(this.config.modelProvider || this.config.model);
+  private async resolveModelSettingsFromFile(modelConfigPath: string): Promise<ModelSettings> {
+    try {
+      const raw = await fs.readFile(modelConfigPath, "utf8");
+      const parsed = parseAstralModelConfig(raw);
+      return normalizeModelSettings({
+        modelProvider: parsed.modelProvider,
+        model: parsed.model,
+        reasoningEffort: parsed.reasoningEffort,
+        source: "astral_config",
+        path: modelConfigPath,
+        error: null,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      warn("failed to read astral model config", {
+        path: modelConfigPath,
+        error: message,
+      });
+      return {
+        modelProvider: null,
+        model: null,
+        reasoningEffort: null,
+        source: "astral_config",
+        path: modelConfigPath,
+        error: message,
+      };
+    }
   }
 
-  private async syncThreadModelSettings(): Promise<void> {
-    if (this.modelSettingsSynced || !this.hasModelSettings()) {
-      this.modelSettingsSynced = this.modelSettingsSynced || !this.hasModelSettings();
-      return;
+  private async syncThreadModelSettings(): Promise<ModelSettings> {
+    const modelSettings = await this.resolveModelSettings();
+    const key = modelSettingsKey(modelSettings);
+    if (!hasModelSettings(modelSettings)) {
+      this.modelSettingsSynced = modelSettings.error === null;
+      this.syncedModelSettingsKey = key;
+      return modelSettings;
+    }
+    if (this.modelSettingsSynced && this.syncedModelSettingsKey === key) {
+      return modelSettings;
     }
 
-    const modelSettings = this.modelSettingsParams();
+    const threadId = this.currentThreadId();
     await this.request("thread/settings/update", {
-      threadId: this.config.threadId,
-      ...modelSettings,
+      threadId,
+      ...modelSettingsParams(modelSettings),
     });
+    this.syncedModelSettingsKey = key;
     this.modelSettingsSynced = true;
-    this.activeTurnId = null;
     log("synced astral thread model settings", {
-      threadId: this.config.threadId,
-      ...modelSettings,
+      threadId,
+      modelProvider: modelSettings.modelProvider,
+      model: modelSettings.model,
+      reasoningEffort: modelSettings.reasoningEffort,
+      source: modelSettings.source,
+      path: modelSettings.path,
     });
+    return modelSettings;
   }
 
   private async ensureConnected(): Promise<void> {
@@ -293,8 +547,11 @@ export class AstralAppServerClient extends EventEmitter {
     socket.on("close", () => {
       this.socket = null;
       this.resumed = false;
+      this.canUpdateThreadSettings = false;
       this.activeTurnId = null;
       this.modelSettingsSynced = false;
+      this.syncedModelSettingsKey = null;
+      this.modelSettingsStatus = emptyModelSettings("none");
       this.compactStatus = idleCompactStatus();
       for (const pending of this.pending.values()) {
         pending.reject(new Error("Astral app-server websocket closed"));
@@ -394,7 +651,7 @@ export class AstralAppServerClient extends EventEmitter {
       return;
     }
     const params = isRecord(message.params) ? message.params : null;
-    if (!params || params.threadId !== this.config.threadId) {
+    if (!params || params.threadId !== this.resolvedThreadId) {
       return;
     }
 
@@ -496,6 +753,186 @@ function idleCompactStatus(): CompactStatus {
     itemId: null,
     startedAtMs: null,
   };
+}
+
+function emptyModelSettings(source: ModelSettings["source"]): ModelSettings {
+  return {
+    modelProvider: null,
+    model: null,
+    reasoningEffort: null,
+    source,
+    path: null,
+    error: null,
+  };
+}
+
+function normalizeModelSettings(settings: ModelSettings): ModelSettings {
+  return {
+    ...settings,
+    modelProvider: normalizeOptionalText(settings.modelProvider),
+    model: normalizeOptionalText(settings.model),
+    reasoningEffort: normalizeOptionalText(settings.reasoningEffort),
+  };
+}
+
+function hasModelSettings(settings: ModelSettings): boolean {
+  return Boolean(settings.modelProvider || settings.model || settings.reasoningEffort);
+}
+
+function modelSettingsParams(settings: ModelSettings): Record<string, string> {
+  const params: Record<string, string> = {};
+  if (settings.modelProvider) {
+    params.modelProvider = settings.modelProvider;
+  }
+  if (settings.model) {
+    params.model = settings.model;
+  }
+  if (settings.reasoningEffort) {
+    params.effort = settings.reasoningEffort;
+  }
+  return params;
+}
+
+function threadStartModelSettingsParams(settings: ModelSettings): Record<string, string> {
+  const params: Record<string, string> = {};
+  if (settings.modelProvider) {
+    params.modelProvider = settings.modelProvider;
+  }
+  if (settings.model) {
+    params.model = settings.model;
+  }
+  return params;
+}
+
+function modelSettingsKey(settings: ModelSettings): string {
+  return JSON.stringify({
+    modelProvider: settings.modelProvider,
+    model: settings.model,
+    reasoningEffort: settings.reasoningEffort,
+    source: settings.source,
+    path: settings.path,
+    error: settings.error,
+  });
+}
+
+function parseAstralModelConfig(raw: string): {
+  modelProvider: string | null;
+  model: string | null;
+  reasoningEffort: string | null;
+} {
+  let modelProvider: string | null = null;
+  let model: string | null = null;
+  let reasoningEffort: string | null = null;
+
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = stripTomlComment(line).trim();
+    if (!trimmed) {
+      continue;
+    }
+    if (trimmed.startsWith("[")) {
+      break;
+    }
+    const match = /^(model_provider|model_reasoning_effort|model)\s*=\s*(.+)$/.exec(trimmed);
+    if (!match) {
+      continue;
+    }
+    const value = parseTomlScalarString(match[2]);
+    if (match[1] === "model_provider") {
+      modelProvider = value;
+    } else if (match[1] === "model_reasoning_effort") {
+      reasoningEffort = value;
+    } else {
+      model = value;
+    }
+  }
+
+  return {
+    modelProvider: normalizeOptionalText(modelProvider),
+    model: normalizeOptionalText(model),
+    reasoningEffort: normalizeOptionalText(reasoningEffort),
+  };
+}
+
+function stripTomlComment(line: string): string {
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inDoubleQuote && char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (!inDoubleQuote && char === "'") {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (!inSingleQuote && char === "\"") {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (!inSingleQuote && !inDoubleQuote && char === "#") {
+      return line.slice(0, index);
+    }
+  }
+  return line;
+}
+
+function parseTomlScalarString(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed.startsWith("\"")) {
+    const endIndex = findTomlDoubleQuoteEnd(trimmed);
+    if (endIndex > 0) {
+      try {
+        return JSON.parse(trimmed.slice(0, endIndex + 1)) as string;
+      } catch {
+        return trimmed.slice(1, endIndex);
+      }
+    }
+  }
+  if (trimmed.startsWith("'")) {
+    const endIndex = trimmed.indexOf("'", 1);
+    if (endIndex > 0) {
+      return trimmed.slice(1, endIndex);
+    }
+  }
+  return trimmed;
+}
+
+function findTomlDoubleQuoteEnd(value: string): number {
+  let escaped = false;
+  for (let index = 1; index < value.length; index += 1) {
+    const char = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "\"") {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function normalizeOptionalText(value: string | null | undefined): string | null {
+  const normalized = String(value ?? "").trim();
+  return normalized ? normalized : null;
+}
+
+function normalizeThreadId(value: unknown): string | null {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized ? normalized : null;
 }
 
 function contextWindowStatus(usage: ThreadTokenUsage | null): Record<string, unknown> | null {

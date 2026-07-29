@@ -3,7 +3,7 @@
 这份目录是 `astral-bridge` 的 Docker 部署模板，主要面向 macOS + OrbStack，也可以用在普通 Docker Compose 主机上。它会启动三类服务：
 
 - `bridge`：接收 QQ/NapCat OneBot 反向 WebSocket、可选 Telegram long polling，并暴露 HTTP MCP。
-- `astral-code`：运行 Astral app-server，所有白名单内的 IM 触发都会进入同一个固定 Astral thread。
+- `astral-code`：运行 Astral app-server，所有白名单内的 IM 触发都会进入同一个 Astral thread。
 - `napcat`：运行 NapCat QQ 协议端，并把 OneBot 事件推给 `bridge`。
 
 ## 目录结构
@@ -104,7 +104,8 @@ astral-bin/astral
 编辑 `.env`，至少需要配置这些值：
 
 ```env
-ASTRAL_THREAD_ID=固定的 Astral thread id
+ASTRAL_THREAD_ID=
+ASTRAL_ROTATE_THREAD_ON_START=false
 ASTRAL_APP_SERVER_TOKEN=长随机 token，用于 bridge 连接 astral-code app-server
 ASTRAL_BRIDGE_EVENT_API_TOKEN=长随机 token，用于外部事件 API
 
@@ -112,6 +113,20 @@ QQ_BOT_ID=机器人 QQ 号
 QQ_ALLOWED_GROUP_IDS=允许访问 bot 的 QQ 群号，多个用逗号分隔
 QQ_ALLOWED_PRIVATE_USER_IDS=允许私聊 bot 的 QQ 用户号，多个用逗号分隔
 ```
+
+`ASTRAL_THREAD_ID` 默认留空，bridge 会在第一次启动时调用 Astral app-server 自动创建 thread，并把
+thread id 存到 `bridge/data/astral-bridge.db`。如果你想绑定已有 thread，可以显式填入
+`ASTRAL_THREAD_ID`；此时 thread 由配置托管，不会被自动轮换覆盖。
+
+需要废弃当前自动 thread 时，先确认没有 active turn，然后调用：
+
+```bash
+curl -X POST http://127.0.0.1:${BRIDGE_MCP_PORT:-6710}/api/astral/thread/rotate \
+  -H "Authorization: Bearer ${ASTRAL_BRIDGE_EVENT_API_TOKEN}"
+```
+
+也可以临时设置 `ASTRAL_ROTATE_THREAD_ON_START=true` 后重启 bridge 来新建一个自动 thread，成功后记得改回
+`false`，避免下次启动继续换 thread。
 
 如果使用 OpenAI 或兼容提供商，还需要配置对应 key：
 
@@ -122,14 +137,8 @@ ASTRAL_API_KEY=...
 
 具体使用哪个变量取决于你的 Astral/provider 配置。不要把 `.env` 提交到仓库。
 
-如果希望由 bridge 配置固定 thread 使用的模型，可以加：
-
-```env
-ASTRAL_MODEL_PROVIDER=mimo
-ASTRAL_MODEL=mimo-v2.5
-```
-
-这两个值只负责告诉 bridge 发起 turn 时选哪个 provider/model；provider 本身、API key、能力声明仍由 `astral-home/config.toml` 管理。
+模型选择只改 `astral-home/config.toml`。bridge 会读取挂载的 Astral 配置，在新 turn 前把当前
+`model_provider` / `model` 同步到当前 thread，避免旧 thread settings 残留覆盖新配置。
 
 如果要开启 QQ/Telegram 语音消息工具，配置 TTS chat-completions endpoint：
 
@@ -289,9 +298,11 @@ Telegram 使用 long polling。bridge 启动时会调用 `deleteWebhook`，确�
   "astral": {
     "appServerUrl": "ws://astral-code:4222",
     "cwd": "/workspace",
+    "modelConfigPath": "/astral-home/config.toml",
     "modelProvider": null,
     "model": null,
-    "includeImageInputs": false
+    "includeImageInputs": false,
+    "rotateThreadOnStart": false
   },
   "storage": {
     "dbPath": "/app/data/astral-bridge.db",
@@ -304,7 +315,7 @@ Telegram 使用 long polling。bridge 启动时会调用 `deleteWebhook`，确�
 重点：
 
 - `astral.cwd` 应保持为 `/workspace`，这样 Astral 的工作区、文件生成、记忆文件都在持久化挂载里。
-- `ASTRAL_MODEL_PROVIDER` / `ASTRAL_MODEL` 可在 `.env` 中覆盖 bridge 发起的新 turn 模型；bridge 恢复固定 thread 后也会同步一次 thread settings。对应的 provider 和 API key 仍需先在 `astral-home/config.toml` 里配置好。
+- `astral.modelConfigPath` 默认指向 `/astral-home/config.toml`；切模型时只改这个 Astral 配置文件，bridge 会在下一次新 turn 前同步当前 thread settings。
 - `storage.dbPath` 和 `storage.mediaDir` 已经映射到 `bridge/data` 和 `bridge/media`，重建 bridge 不会丢历史和媒体。
 - `includeImageInputs=false` 是推荐默认值：入站图片只作为附件元数据进入上下文，agent 需要查看时再用 MCP 下载，避免 QQ/TG 临时 URL 过期或需要鉴权时污染长期会话。只有确认图片 URL 对模型长期稳定可访问时才建议打开。
 

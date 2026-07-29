@@ -42,9 +42,11 @@ const defaultConfig: BridgeConfig = {
     authToken: null,
     threadId: "",
     cwd: null,
+    modelConfigPath: null,
     modelProvider: null,
     model: null,
     includeImageInputs: false,
+    rotateThreadOnStart: false,
   },
   qq: {
     botUserId: "",
@@ -116,9 +118,14 @@ function applyEnvOverrides(config: BridgeConfig): void {
     process.env.ASTRAL_BRIDGE_APP_SERVER_URL ?? config.astral.appServerUrl;
   config.astral.threadId = process.env.ASTRAL_BRIDGE_THREAD_ID ?? config.astral.threadId;
   config.astral.authToken = process.env.ASTRAL_BRIDGE_APP_SERVER_AUTH_TOKEN ?? config.astral.authToken;
+  config.astral.modelConfigPath =
+    envString("ASTRAL_BRIDGE_MODEL_CONFIG_PATH") ?? config.astral.modelConfigPath;
   config.astral.modelProvider =
     envString("ASTRAL_BRIDGE_MODEL_PROVIDER") ?? config.astral.modelProvider;
   config.astral.model = envString("ASTRAL_BRIDGE_MODEL") ?? config.astral.model;
+  config.astral.rotateThreadOnStart =
+    parseBoolean(process.env.ASTRAL_BRIDGE_ROTATE_THREAD_ON_START)
+    ?? config.astral.rotateThreadOnStart;
   config.qq.botUserId = process.env.ASTRAL_BRIDGE_BOT_QQ ?? config.qq.botUserId;
   config.qq.allowedGroupIds = envList("ASTRAL_BRIDGE_ALLOWED_GROUP_IDS") ?? config.qq.allowedGroupIds;
   config.qq.alwaysTriggerGroupIds =
@@ -175,9 +182,7 @@ function applyEnvOverrides(config: BridgeConfig): void {
 }
 
 function validateConfig(config: BridgeConfig): void {
-  if (!config.astral.threadId.trim()) {
-    throw new Error("astral.threadId is required");
-  }
+  config.astral.threadId = normalizeThreadId(config.astral.threadId);
   if (!config.qq.botUserId.trim()) {
     throw new Error("qq.botUserId is required");
   }
@@ -247,6 +252,7 @@ function validateConfig(config: BridgeConfig): void {
   config.tts.baseUrl = String(config.tts.baseUrl).replace(/\/+$/, "");
   config.tts.model = String(config.tts.model).trim();
   config.tts.voice = String(config.tts.voice).trim();
+  config.astral.modelConfigPath = normalizeOptionalString(config.astral.modelConfigPath);
   config.astral.modelProvider = normalizeOptionalString(config.astral.modelProvider);
   config.astral.model = normalizeOptionalString(config.astral.model);
 }
@@ -262,6 +268,20 @@ function envString(name: string): string | null {
 function normalizeOptionalString(value: string | null): string | null {
   const normalized = String(value ?? "").trim();
   return normalized ? normalized : null;
+}
+
+function normalizeThreadId(value: string): string {
+  const normalized = String(value ?? "").trim();
+  const placeholderValues = new Set([
+    "AUTO",
+    "REPLACE_WITH_FIXED_THREAD_ID",
+    "REPLACE_WITH_FIXED_ASTRAL_THREAD_ID",
+    "SET_BY_ASTRAL_BRIDGE_THREAD_ID_ENV",
+  ]);
+  if (!normalized || placeholderValues.has(normalized.toUpperCase())) {
+    return "";
+  }
+  return normalized;
 }
 
 function envList(name: string): string[] | null {
@@ -311,4 +331,7 @@ function normalizeIdList(values: string[]): string[] {
 function absolutizePaths(config: BridgeConfig, baseDir: string): void {
   config.storage.dbPath = path.resolve(baseDir, config.storage.dbPath);
   config.storage.mediaDir = path.resolve(baseDir, config.storage.mediaDir);
+  if (config.astral.modelConfigPath) {
+    config.astral.modelConfigPath = path.resolve(baseDir, config.astral.modelConfigPath);
+  }
 }

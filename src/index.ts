@@ -38,7 +38,7 @@ async function main(): Promise<void> {
   const store = new MessageStore(config.storage);
   const onebot = new OneBotClient(config.onebot);
   const telegram = config.telegram.enabled ? new TelegramClient(config.telegram) : null;
-  const astral = new AstralAppServerClient(config.astral);
+  const astral = new AstralAppServerClient(config.astral, store);
 
   onebot.on("message", (event) => {
     void handleOneBotMessage(config, store, onebot, astral, event).catch((err) => {

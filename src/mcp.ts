@@ -1157,6 +1157,30 @@ async function startHttpMcpServer(
     writeJson(res, 200, dashboardState(config, onebot, telegram, astral, store, externalEventBatcher));
   });
 
+  app.post("/api/astral/thread/rotate", async (req: IncomingMessage, res: ServerResponse) => {
+    try {
+      if (!isAuthorizedEventRequest(config, req)) {
+        writeJson(res, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+      const result = await astral.rotateThread("manual_rotate");
+      if (!result.rotated) {
+        writeJson(res, 409, {
+          ok: false,
+          error: "astral turn is active; interrupt or wait before rotating thread",
+          ...result,
+        });
+        return;
+      }
+      writeJson(res, 200, { ok: true, ...result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.includes("config-managed") ? 409 : 500;
+      error("failed to rotate astral thread", { error: message });
+      writeJson(res, status, { ok: false, error: message });
+    }
+  });
+
   if (config.externalEvents.enabled) {
     app.get(`${config.externalEvents.path}/schema`, (_req: IncomingMessage, res: ServerResponse) => {
       writeJson(res, 200, externalEventApiSchema(config));
@@ -1361,7 +1385,7 @@ function externalEventApiSchema(config: BridgeConfig): Record<string, unknown> {
     paths: {
       [config.externalEvents.path]: {
         post: {
-          summary: "Submit a generic external event to the fixed Astral session.",
+          summary: "Submit a generic external event to the current Astral session.",
           description: "Attention-worthy events are accepted immediately, debounced, merged into bounded batches, and then forwarded to Astral asynchronously.",
           security: config.externalEvents.authToken ? [{ bearerAuth: [] }] : [],
           requestBody: {

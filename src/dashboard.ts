@@ -16,6 +16,7 @@ export function dashboardState(
   store: MessageStore,
   eventBatcher?: ExternalEventBatcher,
 ): Record<string, unknown> {
+  const astralStatus = astral.status();
   return {
     now: new Date().toISOString(),
     startedAt: startedAt.toISOString(),
@@ -23,7 +24,7 @@ export function dashboardState(
     services: {
       onebot: onebot.status(),
       telegram: telegram?.status() ?? { enabled: false, polling: false },
-      astral: astral.status(),
+      astral: astralStatus,
       mcp: {
         transport: config.mcp.transport,
         host: config.mcp.host,
@@ -43,7 +44,11 @@ export function dashboardState(
       },
     },
     routing: {
-      fixedThreadId: config.astral.threadId,
+      threadId: astralStatus.threadId,
+      configuredThreadId: astralStatus.configuredThreadId,
+      threadIdSource: astralStatus.threadIdSource,
+      autoThreadManaged: astralStatus.autoThreadManaged,
+      rotateThreadOnStart: astralStatus.rotateThreadOnStart,
       qqBotUserId: config.qq.botUserId,
       allowedGroupIds: config.qq.allowedGroupIds,
       alwaysTriggerGroupIds: config.qq.alwaysTriggerGroupIds,
@@ -303,7 +308,11 @@ export function dashboardHtml(): string {
       qs('compact').innerHTML = renderCompact(state.services.astral.compact);
       qs('uptime').textContent = Math.floor(state.uptimeSeconds / 60) + 'm';
       qs('routing').innerHTML = [
-        ['thread', state.routing.fixedThreadId],
+        ['thread', state.routing.threadId || 'not initialized'],
+        ['thread source', state.routing.threadIdSource],
+        ['configured thread', state.routing.configuredThreadId || 'auto'],
+        ['auto managed', state.routing.autoThreadManaged],
+        ['rotate on start', state.routing.rotateThreadOnStart],
         ['bot qq', state.routing.qqBotUserId],
         ['groups', state.routing.allowedGroupIds.join(', ')],
         ['always trigger groups', state.routing.alwaysTriggerGroupIds.join(', ')],

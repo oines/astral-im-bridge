@@ -121,6 +121,6 @@ Common errors:
 
 ## Agent Behavior
 
-Events are injected into the fixed Astral session as `[External event]`.
+Events are injected into the current Astral session as `[External event]`.
 
 They are not QQ messages. If an event needs a QQ notification, the agent must call QQ MCP send tools. Plain text output is only visible inside Astral and is not sent to QQ.

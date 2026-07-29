@@ -15,11 +15,13 @@
   "astral": {
     "appServerUrl": "ws://astral-code:4222",
     "authToken": null,
-    "threadId": "SET_BY_ASTRAL_BRIDGE_THREAD_ID_ENV",
+    "threadId": "auto",
     "cwd": "/workspace",
+    "modelConfigPath": "/astral-home/config.toml",
     "modelProvider": null,
     "model": null,
-    "includeImageInputs": false
+    "includeImageInputs": false,
+    "rotateThreadOnStart": false
   },
   "qq": {
     "botUserId": "SET_BY_ASTRAL_BRIDGE_BOT_QQ_ENV",
