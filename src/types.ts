@@ -45,11 +45,15 @@ export interface TelegramConfig {
 
 export interface TtsConfig {
   enabled: boolean;
+  protocol: "chat_completions" | "openai_speech";
   apiKey: string | null;
   baseUrl: string;
   model: string;
-  voice: string;
-  format: "wav";
+  voice: string | null;
+  format: "wav" | "mp3" | "ogg" | "opus" | "m4a";
+  language: string | null;
+  referenceAudioPath: string | null;
+  referenceText: string | null;
   timeoutMs: number;
 }
 
@@ -73,6 +77,7 @@ export interface AstralConfig {
 }
 
 export interface QqConfig {
+  enabled: boolean;
   botUserId: string;
   allowedGroupIds: string[];
   alwaysTriggerGroupIds: string[];

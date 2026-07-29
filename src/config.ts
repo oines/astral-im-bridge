@@ -24,11 +24,15 @@ const defaultConfig: BridgeConfig = {
   },
   tts: {
     enabled: false,
+    protocol: "chat_completions",
     apiKey: null,
     baseUrl: "https://api.xiaomimimo.com/v1",
     model: "mimo-v2.5-tts",
     voice: "mimo_default",
     format: "wav",
+    language: null,
+    referenceAudioPath: null,
+    referenceText: null,
     timeoutMs: 60_000,
   },
   mcp: {
@@ -49,6 +53,7 @@ const defaultConfig: BridgeConfig = {
     rotateThreadOnStart: false,
   },
   qq: {
+    enabled: false,
     botUserId: "",
     allowedGroupIds: [],
     alwaysTriggerGroupIds: [],
@@ -127,6 +132,8 @@ function applyEnvOverrides(config: BridgeConfig): void {
     parseBoolean(process.env.ASTRAL_BRIDGE_ROTATE_THREAD_ON_START)
     ?? config.astral.rotateThreadOnStart;
   config.qq.botUserId = process.env.ASTRAL_BRIDGE_BOT_QQ ?? config.qq.botUserId;
+  config.qq.enabled =
+    parseBoolean(process.env.ASTRAL_BRIDGE_QQ_ENABLED) ?? config.qq.enabled;
   config.qq.allowedGroupIds = envList("ASTRAL_BRIDGE_ALLOWED_GROUP_IDS") ?? config.qq.allowedGroupIds;
   config.qq.alwaysTriggerGroupIds =
     envList("ASTRAL_BRIDGE_ALWAYS_TRIGGER_GROUP_IDS") ?? config.qq.alwaysTriggerGroupIds;
@@ -159,10 +166,20 @@ function applyEnvOverrides(config: BridgeConfig): void {
     process.env.ASTRAL_BRIDGE_TELEGRAM_API_BASE_URL ?? config.telegram.apiBaseUrl;
   config.tts.enabled =
     parseBoolean(process.env.ASTRAL_BRIDGE_TTS_ENABLED) ?? config.tts.enabled;
+  config.tts.protocol =
+    parseTtsProtocol(process.env.ASTRAL_BRIDGE_TTS_PROTOCOL) ?? config.tts.protocol;
   config.tts.apiKey = envString("ASTRAL_BRIDGE_TTS_API_KEY") ?? config.tts.apiKey;
   config.tts.baseUrl = envString("ASTRAL_BRIDGE_TTS_BASE_URL") ?? config.tts.baseUrl;
   config.tts.model = envString("ASTRAL_BRIDGE_TTS_MODEL") ?? config.tts.model;
   config.tts.voice = envString("ASTRAL_BRIDGE_TTS_VOICE") ?? config.tts.voice;
+  config.tts.format =
+    parseTtsFormat(process.env.ASTRAL_BRIDGE_TTS_FORMAT) ?? config.tts.format;
+  config.tts.language =
+    envString("ASTRAL_BRIDGE_TTS_LANGUAGE") ?? config.tts.language;
+  config.tts.referenceAudioPath =
+    envString("ASTRAL_BRIDGE_TTS_REFERENCE_AUDIO_PATH") ?? config.tts.referenceAudioPath;
+  config.tts.referenceText =
+    envString("ASTRAL_BRIDGE_TTS_REFERENCE_TEXT") ?? config.tts.referenceText;
   config.tts.timeoutMs =
     parsePositiveInteger(process.env.ASTRAL_BRIDGE_TTS_TIMEOUT_MS) ?? config.tts.timeoutMs;
   config.mcp.transport = parseMcpTransport(process.env.ASTRAL_BRIDGE_MCP_TRANSPORT) ?? config.mcp.transport;
@@ -183,8 +200,8 @@ function applyEnvOverrides(config: BridgeConfig): void {
 
 function validateConfig(config: BridgeConfig): void {
   config.astral.threadId = normalizeThreadId(config.astral.threadId);
-  if (!config.qq.botUserId.trim()) {
-    throw new Error("qq.botUserId is required");
+  if (config.qq.enabled && !config.qq.botUserId.trim()) {
+    throw new Error("qq.botUserId is required when qq.enabled is true");
   }
   if (!Number.isInteger(config.onebot.port) || config.onebot.port <= 0) {
     throw new Error("onebot.port must be a positive integer");
@@ -201,14 +218,31 @@ function validateConfig(config: BridgeConfig): void {
   if (!config.telegram.apiBaseUrl.startsWith("http://") && !config.telegram.apiBaseUrl.startsWith("https://")) {
     throw new Error("telegram.apiBaseUrl must be an http(s) URL");
   }
-  if (config.tts.enabled && !config.tts.apiKey?.trim()) {
-    throw new Error("tts.apiKey is required when tts.enabled is true");
+  if (
+    config.tts.enabled
+    && config.tts.protocol === "chat_completions"
+    && !config.tts.apiKey?.trim()
+  ) {
+    throw new Error("tts.apiKey is required for chat_completions TTS");
   }
   if (!config.tts.baseUrl.startsWith("http://") && !config.tts.baseUrl.startsWith("https://")) {
     throw new Error("tts.baseUrl must be an http(s) URL");
   }
-  if (config.tts.format !== "wav") {
-    throw new Error("tts.format must be wav");
+  if (config.tts.enabled && !config.tts.model) {
+    throw new Error("tts.model is required when tts.enabled is true");
+  }
+  if (
+    config.tts.enabled
+    && config.tts.protocol === "chat_completions"
+    && !config.tts.voice
+  ) {
+    throw new Error("tts.voice is required for chat_completions TTS");
+  }
+  if (
+    config.tts.enabled
+    && Boolean(config.tts.referenceAudioPath) !== Boolean(config.tts.referenceText)
+  ) {
+    throw new Error("tts.referenceAudioPath and tts.referenceText must be configured together");
   }
   if (!Number.isInteger(config.tts.timeoutMs) || config.tts.timeoutMs <= 0) {
     throw new Error("tts.timeoutMs must be a positive integer");
@@ -251,7 +285,10 @@ function validateConfig(config: BridgeConfig): void {
   config.tts.apiKey = normalizeOptionalString(config.tts.apiKey);
   config.tts.baseUrl = String(config.tts.baseUrl).replace(/\/+$/, "");
   config.tts.model = String(config.tts.model).trim();
-  config.tts.voice = String(config.tts.voice).trim();
+  config.tts.voice = normalizeOptionalString(config.tts.voice);
+  config.tts.language = normalizeOptionalString(config.tts.language);
+  config.tts.referenceAudioPath = normalizeOptionalString(config.tts.referenceAudioPath);
+  config.tts.referenceText = normalizeOptionalString(config.tts.referenceText);
   config.astral.modelConfigPath = normalizeOptionalString(config.astral.modelConfigPath);
   config.astral.modelProvider = normalizeOptionalString(config.astral.modelProvider);
   config.astral.model = normalizeOptionalString(config.astral.model);
@@ -294,6 +331,24 @@ function envList(name: string): string[] | null {
 
 function parseMcpTransport(value: string | undefined): "stdio" | "http" | null {
   if (value === "stdio" || value === "http") {
+    return value;
+  }
+  return null;
+}
+
+function parseTtsProtocol(
+  value: string | undefined,
+): "chat_completions" | "openai_speech" | null {
+  if (value === "chat_completions" || value === "openai_speech") {
+    return value;
+  }
+  return null;
+}
+
+function parseTtsFormat(
+  value: string | undefined,
+): "wav" | "mp3" | "ogg" | "opus" | "m4a" | null {
+  if (value === "wav" || value === "mp3" || value === "ogg" || value === "opus" || value === "m4a") {
     return value;
   }
   return null;

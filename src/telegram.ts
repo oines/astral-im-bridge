@@ -154,6 +154,7 @@ export interface TelegramSendFileOptions {
 export interface TelegramSendVoiceOptions {
   chatId: string;
   file: string;
+  mimeType?: string;
   replyToMessageId?: string;
   replyQuoteText?: string;
   replyQuotePositionUtf16?: number;
@@ -288,7 +289,9 @@ export class TelegramClient extends EventEmitter<TelegramEvents> {
         form.append(key, typeof value === "object" ? JSON.stringify(value) : String(value));
       }
       const bytes = fs.readFileSync(options.file);
-      const blob = new Blob([new Uint8Array(bytes)], { type: "audio/wav" });
+      const blob = new Blob([new Uint8Array(bytes)], {
+        type: options.mimeType ?? audioMimeTypeFromPath(options.file),
+      });
       form.append("voice", blob, path.basename(options.file));
       return this.apiMultipart<TelegramMessage>("sendVoice", form);
     }
@@ -495,6 +498,20 @@ export class TelegramClient extends EventEmitter<TelegramEvents> {
     const result = await parseTelegramResponse<T>(method, response);
     logSlowTelegramApi(method, startedAt);
     return result;
+  }
+}
+
+function audioMimeTypeFromPath(filePath: string): string {
+  switch (path.extname(filePath).toLowerCase()) {
+    case ".mp3":
+      return "audio/mpeg";
+    case ".ogg":
+    case ".opus":
+      return "audio/ogg";
+    case ".m4a":
+      return "audio/mp4";
+    default:
+      return "audio/wav";
   }
 }
 

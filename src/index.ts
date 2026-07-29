@@ -40,23 +40,27 @@ async function main(): Promise<void> {
   const telegram = config.telegram.enabled ? new TelegramClient(config.telegram) : null;
   const astral = new AstralAppServerClient(config.astral, store);
 
-  onebot.on("message", (event) => {
-    void handleOneBotMessage(config, store, onebot, astral, event).catch((err) => {
-      error("failed to handle onebot message", { error: String(err) });
+  if (config.qq.enabled) {
+    onebot.on("message", (event) => {
+      void handleOneBotMessage(config, store, onebot, astral, event).catch((err) => {
+        error("failed to handle onebot message", { error: String(err) });
+      });
     });
-  });
-  onebot.on("poke", (event) => {
-    void handleOneBotPoke(config, store, onebot, astral, event).catch((err) => {
-      error("failed to handle onebot poke", { error: String(err) });
+    onebot.on("poke", (event) => {
+      void handleOneBotPoke(config, store, onebot, astral, event).catch((err) => {
+        error("failed to handle onebot poke", { error: String(err) });
+      });
     });
-  });
+  }
   telegram?.on("message", (message) => {
     void handleTelegramMessage(config, store, telegram, astral, message).catch((err) => {
       error("failed to handle telegram message", { error: String(err) });
     });
   });
 
-  await onebot.start();
+  if (config.qq.enabled) {
+    await onebot.start();
+  }
   await telegram?.start().catch((err) => {
     error("telegram startup failed; continuing without telegram polling", { error: String(err) });
   });

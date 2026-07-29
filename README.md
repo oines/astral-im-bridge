@@ -94,6 +94,7 @@ Start from `examples/config.example.json`:
     "rotateThreadOnStart": false
   },
   "qq": {
+    "enabled": true,
     "botUserId": "REPLACE_WITH_BOT_QQ",
     "allowedGroupIds": ["REPLACE_GROUP_ID"],
     "alwaysTriggerGroupIds": [],
@@ -115,11 +116,15 @@ Start from `examples/config.example.json`:
   },
   "tts": {
     "enabled": false,
-    "apiKey": "REPLACE_WITH_TTS_API_KEY",
-    "baseUrl": "https://api.xiaomimimo.com/v1",
-    "model": "mimo-v2.5-tts",
-    "voice": "mimo_default",
-    "format": "wav",
+    "protocol": "openai_speech",
+    "apiKey": null,
+    "baseUrl": "http://127.0.0.1:8765/v1",
+    "model": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
+    "voice": null,
+    "format": "mp3",
+    "language": "Chinese",
+    "referenceAudioPath": "/absolute/path/on/tts-server/atri.wav",
+    "referenceText": "参考音频中准确说出的文字",
     "timeoutMs": 60000
   },
   "externalEvents": {
@@ -151,6 +156,7 @@ Environment overrides:
 | `ASTRAL_BRIDGE_MODEL_CONFIG_PATH` | Optional Astral `config.toml` path. When set, bridge reads `model_provider` and `model` from this file before new turns and syncs the current thread settings. |
 | `ASTRAL_BRIDGE_MODEL_PROVIDER` | Optional static provider override when `modelConfigPath` is not set. |
 | `ASTRAL_BRIDGE_MODEL` | Optional static model override when `modelConfigPath` is not set. |
+| `ASTRAL_BRIDGE_QQ_ENABLED` | Enable the QQ/NapCat channel and expose QQ MCP tools. |
 | `ASTRAL_BRIDGE_BOT_QQ` | Bot QQ user id. |
 | `ASTRAL_BRIDGE_ALLOWED_GROUP_IDS` | Comma-separated allowed group ids. |
 | `ASTRAL_BRIDGE_ALWAYS_TRIGGER_GROUP_IDS` | Comma-separated group ids where every non-bot message is forwarded to Astral. |
@@ -166,10 +172,15 @@ Environment overrides:
 | `ASTRAL_BRIDGE_TELEGRAM_POLL_TIMEOUT_SECONDS` | Telegram `getUpdates` long-poll timeout. |
 | `ASTRAL_BRIDGE_TELEGRAM_POLL_INTERVAL_MS` | Delay after a failed Telegram poll before retrying. |
 | `ASTRAL_BRIDGE_TTS_ENABLED` | Enable TTS-backed QQ/Telegram voice message tools. |
-| `ASTRAL_BRIDGE_TTS_API_KEY` | API key used by the TTS chat-completions endpoint. |
-| `ASTRAL_BRIDGE_TTS_BASE_URL` | TTS API base URL, default `https://api.xiaomimimo.com/v1`. |
-| `ASTRAL_BRIDGE_TTS_MODEL` | TTS model, default `mimo-v2.5-tts`. |
+| `ASTRAL_BRIDGE_TTS_PROTOCOL` | `chat_completions` for MiMo-style audio responses or `openai_speech` for `/v1/audio/speech`, including MLX-Audio. |
+| `ASTRAL_BRIDGE_TTS_API_KEY` | Optional API key. Required by `chat_completions`; local `openai_speech` servers can leave it empty. |
+| `ASTRAL_BRIDGE_TTS_BASE_URL` | TTS API base URL, including `/v1`. |
+| `ASTRAL_BRIDGE_TTS_MODEL` | TTS model id sent to the configured endpoint. |
 | `ASTRAL_BRIDGE_TTS_VOICE` | Configured bot voice, hidden from MCP tool schemas. |
+| `ASTRAL_BRIDGE_TTS_FORMAT` | Audio response format: `wav`, `mp3`, `ogg`, `opus`, or `m4a`. |
+| `ASTRAL_BRIDGE_TTS_LANGUAGE` | Optional language hint sent as `lang_code` to `openai_speech`. |
+| `ASTRAL_BRIDGE_TTS_REFERENCE_AUDIO_PATH` | Optional reference audio path as seen by the TTS server. |
+| `ASTRAL_BRIDGE_TTS_REFERENCE_TEXT` | Exact transcript of the reference audio; must be configured together with its path. |
 | `ASTRAL_BRIDGE_TTS_TIMEOUT_MS` | TTS request timeout in milliseconds. |
 | `ASTRAL_BRIDGE_MCP_TRANSPORT` | `stdio` or `http`. |
 | `ASTRAL_BRIDGE_EVENT_API_ENABLED` | Enable or disable the external event API. |
@@ -250,6 +261,8 @@ url = "http://bridge:6710/mcp"
 The bridge exposes both QQ and Telegram tools from the same MCP endpoint. Registering the
 endpoint under both `qq` and `telegram` gives the agent natural tool names such as
 `mcp__qq__qq_send_group_message` and `mcp__telegram__telegram_send_message`.
+QQ tools are registered only when `qq.enabled` is true, Telegram tools only when
+`telegram.enabled` is true, and voice tools only when `tts.enabled` is true.
 
 ## MCP Tools
 

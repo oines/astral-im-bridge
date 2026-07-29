@@ -132,7 +132,7 @@ export async function startMcpServer(
   await server.connect(transport);
 }
 
-function createBridgeMcpServer(
+export function createBridgeMcpServer(
   config: BridgeConfig,
   onebot: OneBotClient,
   telegram: TelegramClient | null,
@@ -143,6 +143,7 @@ function createBridgeMcpServer(
     version: "0.1.0",
   });
 
+  if (config.qq.enabled) {
   server.tool(
     "qq_get_recent_messages",
     "Get recent stored QQ messages for a group or private conversation.",
@@ -199,6 +200,7 @@ function createBridgeMcpServer(
       args.limit,
     ))),
   );
+  }
 
   server.tool(
     "query_messages_advanced",
@@ -222,6 +224,7 @@ function createBridgeMcpServer(
     },
   );
 
+  if (config.qq.enabled) {
   server.tool(
     "qq_get_conversation_state",
     "Get bridge state for a QQ conversation.",
@@ -406,6 +409,7 @@ function createBridgeMcpServer(
     },
   );
 
+  if (config.tts.enabled) {
   server.tool(
     "qq_send_group_voice",
     "Send a QQ group voice message generated from text using the configured TTS voice. This sends a real QQ voice/record message, not a file upload.",
@@ -487,6 +491,7 @@ function createBridgeMcpServer(
       }
     },
   );
+  }
 
   server.tool(
     "qq_send_group_file",
@@ -551,6 +556,7 @@ function createBridgeMcpServer(
   );
 
   registerGroupAdminTools(server, config, onebot);
+  }
   if (telegram) {
     registerTelegramTools(server, config, telegram, store);
   }
@@ -997,58 +1003,61 @@ function registerTelegramTools(
     },
   );
 
-  server.tool(
-    "telegram_send_voice",
-    "Send a Telegram voice message generated from text using the configured TTS voice. This sends a real Telegram voice message via sendVoice, not a document/file.",
-    {
-      chat_id: z.string(),
-      text: z.string().trim().min(1).max(2_000),
-      style: z.string().trim().max(1_000).optional(),
-      reply_to_message_id: z.string().optional(),
-      ...telegramReplyQuoteFields,
-      message_thread_id: z.string().optional(),
-    },
-    async (args) => {
-      const replyQuote = resolveTelegramMcpReplyQuote(store, args);
-      const voice = await buildVoiceMessage(config, store, {
-        text: args.text,
-        style: args.style,
-      });
-      try {
-        const response = await telegram.sendVoice({
-          chatId: args.chat_id,
-          file: voice.audioPath,
-          replyToMessageId: args.reply_to_message_id,
-          replyQuoteText: replyQuote?.text,
-          replyQuotePositionUtf16: replyQuote?.position_utf16,
-          messageThreadId: args.message_thread_id,
+  if (config.tts.enabled) {
+    server.tool(
+      "telegram_send_voice",
+      "Send a Telegram voice message generated from text using the configured TTS voice. This sends a real Telegram voice message via sendVoice, not a document/file.",
+      {
+        chat_id: z.string(),
+        text: z.string().trim().min(1).max(2_000),
+        style: z.string().trim().max(1_000).optional(),
+        reply_to_message_id: z.string().optional(),
+        ...telegramReplyQuoteFields,
+        message_thread_id: z.string().optional(),
+      },
+      async (args) => {
+        const replyQuote = resolveTelegramMcpReplyQuote(store, args);
+        const voice = await buildVoiceMessage(config, store, {
+          text: args.text,
+          style: args.style,
         });
-        await saveTelegramOutboundMessage(config, telegram, store, {
-          chatId: args.chat_id,
-          action: "sendVoice",
-          response,
-          segments: voice.historySegments,
-          replyToMessageId: args.reply_to_message_id,
-          replyQuote,
-        });
-        return structured(compactActionResponse({
-          ok: true,
-          platform: "telegram",
-          action: "send_voice",
-          chat_id: args.chat_id,
-          chat_type: response.chat.type,
-          chat_title: telegramChatTitle(response),
-          message_id: String(response.message_id),
-          message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
-          reply_to_message_id: args.reply_to_message_id ?? null,
-          reply_quote: replyQuote,
-          text: voice.text,
-        }));
-      } finally {
-        deleteTempVoiceFile(voice.audioPath);
-      }
-    },
-  );
+        try {
+          const response = await telegram.sendVoice({
+            chatId: args.chat_id,
+            file: voice.audioPath,
+            mimeType: voice.mimeType,
+            replyToMessageId: args.reply_to_message_id,
+            replyQuoteText: replyQuote?.text,
+            replyQuotePositionUtf16: replyQuote?.position_utf16,
+            messageThreadId: args.message_thread_id,
+          });
+          await saveTelegramOutboundMessage(config, telegram, store, {
+            chatId: args.chat_id,
+            action: "sendVoice",
+            response,
+            segments: voice.historySegments,
+            replyToMessageId: args.reply_to_message_id,
+            replyQuote,
+          });
+          return structured(compactActionResponse({
+            ok: true,
+            platform: "telegram",
+            action: "send_voice",
+            chat_id: args.chat_id,
+            chat_type: response.chat.type,
+            chat_title: telegramChatTitle(response),
+            message_id: String(response.message_id),
+            message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
+            reply_to_message_id: args.reply_to_message_id ?? null,
+            reply_quote: replyQuote,
+            text: voice.text,
+          }));
+        } finally {
+          deleteTempVoiceFile(voice.audioPath);
+        }
+      },
+    );
+  }
 
   server.tool(
     "telegram_delete_message",
@@ -1770,6 +1779,7 @@ async function buildVoiceMessage(
 ): Promise<{
   text: string;
   audioPath: string;
+  mimeType: string;
   historySegments: MessageSegment[];
 }> {
   const text = options.text.trim();
@@ -1782,6 +1792,7 @@ async function buildVoiceMessage(
   return {
     text,
     audioPath,
+    mimeType: speech.mimeType,
     historySegments: voiceHistorySegments(text),
   };
 }

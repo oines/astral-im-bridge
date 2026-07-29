@@ -22,7 +22,10 @@ export function dashboardState(
     startedAt: startedAt.toISOString(),
     uptimeSeconds: Math.floor(process.uptime()),
     services: {
-      onebot: onebot.status(),
+      onebot: {
+        enabled: config.qq.enabled,
+        ...onebot.status(),
+      },
       telegram: telegram?.status() ?? { enabled: false, polling: false },
       astral: astralStatus,
       mcp: {
@@ -299,7 +302,7 @@ export function dashboardHtml(): string {
       const res = await fetch('/api/dashboard/state', { cache: 'no-store' });
       const state = await res.json();
       qs('refresh').textContent = 'updated ' + time(state.now);
-      qs('napcat').innerHTML = yes(state.services.onebot.connected);
+      qs('napcat').innerHTML = state.services.onebot.enabled ? yes(state.services.onebot.connected) : '<span class="muted">disabled</span>';
       qs('telegram').innerHTML = state.services.telegram.enabled ? yes(state.services.telegram.polling) : '<span class="muted">disabled</span>';
       qs('astral').innerHTML = yes(state.services.astral.connected);
       qs('turn').innerHTML = state.services.astral.activeTurnId ? '<span class="warn">' + esc(state.services.astral.activeTurnId) + '</span>' : '<span class="muted">idle</span>';

@@ -109,6 +109,7 @@ ASTRAL_ROTATE_THREAD_ON_START=false
 ASTRAL_APP_SERVER_TOKEN=长随机 token，用于 bridge 连接 astral-code app-server
 ASTRAL_BRIDGE_EVENT_API_TOKEN=长随机 token，用于外部事件 API
 
+QQ_ENABLED=true
 QQ_BOT_ID=机器人 QQ 号
 QQ_ALLOWED_GROUP_IDS=允许访问 bot 的 QQ 群号，多个用逗号分隔
 QQ_ALLOWED_PRIVATE_USER_IDS=允许私聊 bot 的 QQ 用户号，多个用逗号分隔
@@ -140,16 +141,50 @@ ASTRAL_API_KEY=...
 模型选择只改 `astral-home/config.toml`。bridge 会读取挂载的 Astral 配置，在新 turn 前把当前
 `model_provider` / `model` 同步到当前 thread，避免旧 thread settings 残留覆盖新配置。
 
-如果要开启 QQ/Telegram 语音消息工具，配置 TTS chat-completions endpoint：
+QQ 和 Telegram 是独立渠道。`QQ_ENABLED=false` 时 bridge 不启动 OneBot 监听，也不向
+agent 暴露任何 QQ 工具；`TELEGRAM_ENABLED=false` 时同理。TTS 未启用时，QQ/TG 的
+普通消息和文件工具仍可用，但三个语音工具不会出现在 MCP 工具列表。
+
+### 本机 MLX Qwen3 TTS
+
+在 Apple Silicon macOS 宿主机安装并启动 MLX-Audio：
+
+```bash
+uv tool install --force mlx-audio --prerelease=allow
+mlx_audio.server --host 127.0.0.1 --port 8765
+```
+
+模型会在第一次请求时下载并加载。Bridge 容器通过 `host.docker.internal` 访问宿主机，
+不需要把 MLX 或模型装进 Docker。配置 0.6B bf16 和 ATRI 参考音频：
 
 ```env
 TTS_ENABLED=true
-TTS_API_KEY=...
-TTS_MODEL=mimo-v2.5-tts
-TTS_VOICE=mimo_default
+TTS_PROTOCOL=openai_speech
+TTS_API_KEY=
+TTS_BASE_URL=http://host.docker.internal:8765/v1
+TTS_MODEL=mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16
+TTS_VOICE=
+TTS_FORMAT=mp3
+TTS_LANGUAGE=Chinese
+TTS_REFERENCE_AUDIO_PATH=/Users/你的用户名/path/to/atri.wav
+TTS_REFERENCE_TEXT=参考音频中准确说出的完整文字
 ```
 
-`TTS_VOICE` 是 bot 的固定音色配置，不会暴露在 MCP 工具 schema 里。语音音频只作为临时文件用于发送，发送后会删除。
+`TTS_REFERENCE_AUDIO_PATH` 是 **MLX 服务所在的 macOS 宿主机路径**，不是容器路径。
+参考音频和文字必须同时配置；文字应与音频逐字对应。`TTS_VOICE`、参考音频和参考文字
+都不会暴露在 MCP 工具 schema 里。生成的语音只作为临时文件用于发送，发送后删除。
+
+如需继续使用原来的 MiMo chat-completions TTS：
+
+```env
+TTS_ENABLED=true
+TTS_PROTOCOL=chat_completions
+TTS_API_KEY=...
+TTS_BASE_URL=https://api.xiaomimimo.com/v1
+TTS_MODEL=mimo-v2.5-tts
+TTS_VOICE=mimo_default
+TTS_FORMAT=wav
+```
 
 ## 端口
 

@@ -24,6 +24,7 @@
     "rotateThreadOnStart": false
   },
   "qq": {
+    "enabled": true,
     "botUserId": "SET_BY_ASTRAL_BRIDGE_BOT_QQ_ENV",
     "allowedGroupIds": [],
     "alwaysTriggerGroupIds": [],
@@ -45,11 +46,15 @@
   },
   "tts": {
     "enabled": false,
+    "protocol": "openai_speech",
     "apiKey": null,
-    "baseUrl": "https://api.xiaomimimo.com/v1",
-    "model": "mimo-v2.5-tts",
-    "voice": "mimo_default",
-    "format": "wav",
+    "baseUrl": "http://host.docker.internal:8765/v1",
+    "model": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
+    "voice": null,
+    "format": "mp3",
+    "language": "Chinese",
+    "referenceAudioPath": null,
+    "referenceText": null,
     "timeoutMs": 60000
   },
   "externalEvents": {
