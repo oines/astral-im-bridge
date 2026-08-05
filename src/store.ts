@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { buildFtsIndexText, buildFtsMatchQuery } from "./message_fts.js";
 import type {
   ConversationUnread,
   Platform,
@@ -12,23 +13,8 @@ import type {
   StorageConfig,
 } from "./types.js";
 
-const ADVANCED_QUERY_DEFAULT_ROWS = 50;
-const ADVANCED_QUERY_MAX_ROWS = 100;
-const ADVANCED_QUERY_MAX_SQL_CHARS = 5000;
-const ADVANCED_QUERY_MAX_CELL_CHARS = 500;
-const ADVANCED_QUERY_MAX_JSON_BYTES = 64 * 1024;
 const MESSAGES_FTS_INDEX_VERSION = "1";
 const MESSAGES_FTS_META_KEY = "messages_fts_index_version";
-
-export interface AdvancedMessageQueryResult {
-  ok: true;
-  columns: string[];
-  rows: Record<string, unknown>[];
-  returned_count: number;
-  row_limit: number;
-  truncated: boolean;
-  notes: string[];
-}
 
 export class MessageStore {
   private readonly db: DatabaseSync;
@@ -204,43 +190,6 @@ export class MessageStore {
       )
       .all(platform, sourceType, targetId, matchQuery, boundedLimit) as unknown as StoredMessageRow[];
     return rows.map((row) => this.rowToMessage(row));
-  }
-
-  queryMessagesAdvanced(sql: string, maxRows = ADVANCED_QUERY_DEFAULT_ROWS): AdvancedMessageQueryResult {
-    const boundedRows = Math.min(Math.max(Math.trunc(maxRows) || ADVANCED_QUERY_DEFAULT_ROWS, 1), ADVANCED_QUERY_MAX_ROWS);
-    const normalizedSql = normalizeAdvancedQuerySql(sql);
-    const stmt = this.db.prepare(`SELECT * FROM (${normalizedSql}) AS advanced_message_query LIMIT ?`);
-    const columns = stmt.columns().map((c) => c.name);
-    const notes: string[] = [];
-
-    let rawRows: Record<string, unknown>[];
-    this.db.exec("PRAGMA query_only = ON");
-    try {
-      rawRows = stmt.all(boundedRows + 1) as Record<string, unknown>[];
-    } finally {
-      this.db.exec("PRAGMA query_only = OFF");
-    }
-
-    let truncated = false;
-    if (rawRows.length > boundedRows) {
-      rawRows = rawRows.slice(0, boundedRows);
-      truncated = true;
-      notes.push("row limit reached");
-    }
-
-    const rows = rawRows.map((row) => normalizeAdvancedQueryRow(row, notes));
-    let result: AdvancedMessageQueryResult = {
-      ok: true,
-      columns,
-      rows,
-      returned_count: rows.length,
-      row_limit: boundedRows,
-      truncated,
-      notes: uniqueNotes(notes),
-    };
-
-    result = enforceAdvancedQueryJsonLimit(result);
-    return result;
   }
 
   getAttachment(id: number): StoredAttachment | null {
@@ -801,195 +750,6 @@ interface MessageFtsSource {
   role: string | null;
   text: string;
   rawMessage: string;
-}
-
-function buildFtsIndexText(...parts: Array<string | null | undefined>): string {
-  const values = parts.map((part) => part?.trim()).filter((part): part is string => !!part);
-  const tokens = new Set<string>();
-  for (const value of values) {
-    for (const token of cjkNgramTokens(value)) {
-      tokens.add(token);
-    }
-  }
-  return [...values, ...tokens].join(" ");
-}
-
-function buildFtsMatchQuery(query: string): string {
-  const terms = new Set<string>();
-  const trimmed = query.trim();
-  if (!trimmed) {
-    return "";
-  }
-  terms.add(trimmed);
-  for (const term of asciiSearchTerms(trimmed)) {
-    terms.add(term);
-  }
-  for (const term of cjkNgramTokens(trimmed)) {
-    terms.add(term);
-  }
-  return [...terms].map(quoteFtsTerm).join(" OR ");
-}
-
-function quoteFtsTerm(term: string): string {
-  return `"${term.replaceAll("\"", "\"\"")}"`;
-}
-
-function asciiSearchTerms(value: string): string[] {
-  return value.match(/[A-Za-z0-9_][A-Za-z0-9_.:-]*/g) ?? [];
-}
-
-function cjkNgramTokens(value: string): string[] {
-  const tokens = new Set<string>();
-  for (const match of value.matchAll(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu)) {
-    const run = match[0];
-    for (const size of [2, 3]) {
-      if (run.length < size) {
-        continue;
-      }
-      for (let i = 0; i <= run.length - size; i += 1) {
-        tokens.add(run.slice(i, i + size));
-      }
-    }
-  }
-  return [...tokens];
-}
-
-function normalizeAdvancedQuerySql(sql: string): string {
-  let trimmed = sql.trim();
-  if (!trimmed) {
-    throw new Error("Query must not be empty");
-  }
-  if (trimmed.length > ADVANCED_QUERY_MAX_SQL_CHARS) {
-    throw new Error(`Query is too long; maximum is ${ADVANCED_QUERY_MAX_SQL_CHARS} characters`);
-  }
-
-  const statementSeparator = findSqlStatementSeparator(trimmed);
-  if (statementSeparator !== -1) {
-    if (trimmed.slice(statementSeparator + 1).trim()) {
-      throw new Error("Only one SELECT statement is allowed");
-    }
-    trimmed = trimmed.slice(0, statementSeparator).trimEnd();
-  }
-
-  if (/^with\b/i.test(trimmed)) {
-    throw new Error("WITH queries are not supported; start with SELECT");
-  }
-  if (!/^select\b/i.test(trimmed)) {
-    throw new Error("Query must start with SELECT");
-  }
-
-  return trimmed;
-}
-
-function findSqlStatementSeparator(sql: string): number {
-  let quote: "'" | "\"" | "`" | "]" | null = null;
-  for (let i = 0; i < sql.length; i += 1) {
-    const char = sql[i];
-    if (quote) {
-      if (quote === "]") {
-        if (char === "]") {
-          quote = null;
-        }
-        continue;
-      }
-      if (char === quote) {
-        if ((quote === "'" || quote === "\"") && sql[i + 1] === quote) {
-          i += 1;
-          continue;
-        }
-        quote = null;
-      }
-      continue;
-    }
-    if (char === "'" || char === "\"" || char === "`") {
-      quote = char;
-      continue;
-    }
-    if (char === "[") {
-      quote = "]";
-      continue;
-    }
-    if (char === ";") {
-      return i;
-    }
-  }
-  return -1;
-}
-
-function normalizeAdvancedQueryRow(
-  row: Record<string, unknown>,
-  notes: string[],
-): Record<string, unknown> {
-  const normalized: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(row)) {
-    normalized[key] = normalizeAdvancedQueryValue(value, notes);
-  }
-  return normalized;
-}
-
-function normalizeAdvancedQueryValue(value: unknown, notes: string[]): unknown {
-  if (typeof value === "string") {
-    if (value.length > ADVANCED_QUERY_MAX_CELL_CHARS) {
-      notes.push("cell text truncated");
-      return `${value.slice(0, ADVANCED_QUERY_MAX_CELL_CHARS)}...`;
-    }
-    return value;
-  }
-  if (typeof value === "bigint") {
-    notes.push("bigint values returned as strings");
-    return value.toString();
-  }
-  if (value instanceof Uint8Array) {
-    notes.push("binary values omitted");
-    return `<binary ${value.byteLength} bytes>`;
-  }
-  if (value instanceof ArrayBuffer) {
-    notes.push("binary values omitted");
-    return `<binary ${value.byteLength} bytes>`;
-  }
-  if (
-    value == null
-    || typeof value === "number"
-    || typeof value === "boolean"
-  ) {
-    return value;
-  }
-  notes.push("non-scalar values stringified");
-  return String(value);
-}
-
-function enforceAdvancedQueryJsonLimit(result: AdvancedMessageQueryResult): AdvancedMessageQueryResult {
-  const notes = [...result.notes];
-  const adjusted: AdvancedMessageQueryResult = {
-    ...result,
-    notes: uniqueNotes(notes),
-  };
-
-  while (jsonByteLength(adjusted) > ADVANCED_QUERY_MAX_JSON_BYTES && adjusted.rows.length > 0) {
-    adjusted.rows.pop();
-    adjusted.returned_count = adjusted.rows.length;
-    adjusted.truncated = true;
-    notes.push("result size limit reached");
-    adjusted.notes = uniqueNotes(notes);
-  }
-
-  if (jsonByteLength(adjusted) > ADVANCED_QUERY_MAX_JSON_BYTES) {
-    adjusted.rows = [];
-    adjusted.returned_count = 0;
-    adjusted.truncated = true;
-    notes.push("result metadata exceeded size limit");
-    adjusted.notes = uniqueNotes(notes);
-  }
-
-  return adjusted;
-}
-
-function jsonByteLength(value: unknown): number {
-  return Buffer.byteLength(JSON.stringify(value), "utf8");
-}
-
-function uniqueNotes(notes: string[]): string[] {
-  return [...new Set(notes)];
 }
 
 interface ConversationCursorRow {

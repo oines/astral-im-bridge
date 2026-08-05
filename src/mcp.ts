@@ -13,6 +13,7 @@ import { registerGroupAdminTools } from "./group_admin_tools.js";
 import { error, log, warn } from "./logger.js";
 import { downloadAttachmentFromUrl, ensureAttachmentDownloaded, writeMediaFile } from "./media.js";
 import { buildOutboundStoredMessage, replySegmentMessageId, sanitizeCqMessage } from "./message.js";
+import { runMessageQuery } from "./message_query.js";
 import type { OneBotClient } from "./onebot.js";
 import { QQ_REACTION_EMOJI_IDS, TELEGRAM_REACTION_EMOJIS } from "./reactions.js";
 import type { MessageStore } from "./store.js";
@@ -33,21 +34,37 @@ import type { BridgeConfig, ExternalEvent, MessageSegment, SourceType, StoredAtt
 const QQ_SEND_DELAY_MIN_MS = 3000;
 const QQ_SEND_DELAY_MAX_MS = 5000;
 
+const MESSAGE_QUERY_TOOL_DESCRIPTION = `Run JavaScript over stored QQ and Telegram history using a read-only query environment. Use the ordinary recent, unread, and get-message tools for simple lookups; use this tool for cross-chat recall, full-text discovery, reply/context analysis, attachment lookup, timelines, and custom aggregation.
+
+The code is the body of an async function and must return a JSON-serializable value. Available helpers:
+- search(text, opts?): FTS5 search with Chinese 2/3-gram expansion and BM25 ranking. Options: platform, source_type, target_id, user_id, after, before, limit (default 20), context_limit (default 1).
+- messages(opts?): filter messages by platform, source_type, target_id, user_id, message_id, reply_to_message_id, trigger, after, before, has_attachments, order (asc/desc), and limit (default 50).
+- context(row_id, opts?): get the target message, attachments, reply chain, and nearby messages. Options: before (default 10), after (default 10), reply_depth (default 5).
+- conversations(opts?): aggregate conversations by platform/source_type/target_id. Options: platform, source_type, target_id, user_id, after, before, min_messages, limit (default 50).
+- sql(query, ...params): run one read-only SELECT or WITH query for custom joins and aggregations.
+- schema(table?): inspect the live messages, attachments, and messages_fts schema plus helper signatures.
+
+Message helpers return row_id as the stable internal id accepted by context(). Time fields are Unix seconds; after/before accept Unix seconds or ISO-8601 strings. Helper limits are defaults, not maximums.
+
+Examples:
+return search("电路图", { platform: "qq", context_limit: 2 });
+const rows = sql("SELECT user_id, COUNT(*) AS count FROM messages WHERE target_id = ? GROUP BY user_id ORDER BY count DESC", "728563593"); return rows;`;
+
 const outboundPartSchema = z.object({
-  type: z.enum(["text", "at", "image"]),
-  text: z.string().optional(),
-  user_id: z.string().optional(),
-  file: z.string().optional(),
-});
+  type: z.enum(["text", "at", "image"]).describe("Part kind."),
+  text: z.string().optional().describe("Text content for a text part."),
+  user_id: z.string().optional().describe("QQ user id for an at part."),
+  file: z.string().optional().describe("Local path or URL for an image part."),
+}).describe("One ordered QQ message part; provide the field matching type.");
 
 type OutboundPart = z.infer<typeof outboundPartSchema>;
 
 const telegramOutboundPartSchema = z.object({
-  type: z.enum(["text", "mention"]),
-  text: z.string().optional(),
-  username: z.string().optional(),
-  user_id: z.string().optional(),
-});
+  type: z.enum(["text", "mention"]).describe("Part kind."),
+  text: z.string().optional().describe("Text content, or the visible label for a user_id mention."),
+  username: z.string().optional().describe("Telegram username for a mention, without @."),
+  user_id: z.string().optional().describe("Telegram user id for a mention when no username is available."),
+}).describe("One ordered Telegram message part; provide text or one mention target.");
 
 type TelegramOutboundPart = z.infer<typeof telegramOutboundPartSchema>;
 
@@ -187,7 +204,7 @@ export function createBridgeMcpServer(
 
   server.tool(
     "qq_get_unread_messages",
-    "Get the current unread batch for a group or private conversation. This returns the messages counted by the latest conversation_unread prompt.",
+    "Get the current unread batch for a group or private conversation. This returns the messages counted by the latest conversation_unread_count field.",
     {
       target_type: z.enum(["group", "private"]),
       target_id: z.string(),
@@ -203,15 +220,16 @@ export function createBridgeMcpServer(
   }
 
   server.tool(
-    "query_messages_advanced",
-    "Advanced read-only SQL query over stored QQ and Telegram message history. Use qq_get_recent_messages/telegram_get_recent_messages, get_unread, or get_message for simple lookups; use this only for cross-platform queries, time ranges, sender filters, attachment joins, reply relationships, full-text search ranking, or aggregate statistics. Queryable tables: messages(id, platform, platform_message_id, source_type, target_id, group_id, group_name, user_id, nickname, group_card, role, time, text, raw_message, trigger, reply_to_message_id, raw_event_json), attachments(id, message_row_id, kind, file_id, name, url, path, mime_type, size, raw_json), and messages_fts(rowid, text, raw_message, sender, conversation). For ranked full-text search, join messages_fts to messages and order by bm25(messages_fts), e.g. SELECT m.platform, m.platform_message_id, m.text, bm25(messages_fts) AS rank FROM messages_fts JOIN messages AS m ON m.id = messages_fts.rowid WHERE messages_fts MATCH '图片 OR 电路图' ORDER BY rank LIMIT 20. Only a single SELECT statement is supported; WITH and write/admin statements are rejected.",
+    "query_messages",
+    MESSAGE_QUERY_TOOL_DESCRIPTION,
     {
-      sql: z.string().trim().min(1).max(5000).describe("Single read-only SELECT query over messages and/or attachments."),
-      max_rows: z.number().int().min(1).max(100).default(50).describe("Maximum rows to return; default 50, maximum 100."),
+      code: z.string().trim().min(1).describe(
+        "Async JavaScript function body. Use the provided helpers and finish with return <json_value>.",
+      ),
     },
     async (args) => {
       try {
-        return structuredCompact(store.queryMessagesAdvanced(args.sql, args.max_rows));
+        return structuredCompact(await runMessageQuery(config.storage.dbPath, args.code));
       } catch (err) {
         return {
           ...structuredCompact({
@@ -334,9 +352,9 @@ export function createBridgeMcpServer(
     "Send a QQ group message. Supports exact ordered parts for mixed text, @mentions, and images.",
     {
       group_id: z.string(),
-      message: z.string().default(""),
-      images: z.array(z.string()).default([]),
-      parts: z.array(outboundPartSchema).optional(),
+      message: z.string().default("").describe("Message text; when parts are present, this is appended after them."),
+      images: z.array(z.string()).default([]).describe("Local image paths or URLs appended after message text."),
+      parts: z.array(outboundPartSchema).optional().describe("Exact ordered text, at, and image parts."),
       reply_to_message_id: z.string().optional(),
     },
     async (args) => {
@@ -374,9 +392,9 @@ export function createBridgeMcpServer(
     "Send a QQ private message. Supports exact ordered text/image parts and replying to a message id.",
     {
       user_id: z.string(),
-      message: z.string().default(""),
-      images: z.array(z.string()).default([]),
-      parts: z.array(outboundPartSchema).optional(),
+      message: z.string().default("").describe("Message text; when parts are present, this is appended after them."),
+      images: z.array(z.string()).default([]).describe("Local image paths or URLs appended after message text."),
+      parts: z.array(outboundPartSchema).optional().describe("Exact ordered text and image parts."),
       reply_to_message_id: z.string().optional(),
     },
     async (args) => {
@@ -785,7 +803,7 @@ function registerTelegramTools(
 
   server.tool(
     "telegram_get_unread_messages",
-    "Get the current unread batch for a Telegram chat. This returns the messages counted by the latest conversation_unread prompt.",
+    "Get the current unread batch for a Telegram chat. This returns the messages counted by the latest conversation_unread_count field.",
     {
       chat_id: z.string(),
       target_type: z.enum(["group", "private"]).default("group"),
@@ -853,8 +871,8 @@ function registerTelegramTools(
     "Send a Telegram message. Supports ordered text and mention parts, topic thread ids, replies, and selected quote replies with reply_quote_text.",
     {
       chat_id: z.string(),
-      message: z.string().default(""),
-      parts: z.array(telegramOutboundPartSchema).optional(),
+      message: z.string().default("").describe("Message text; when parts are present, this is appended after them."),
+      parts: z.array(telegramOutboundPartSchema).optional().describe("Exact ordered text and mention parts."),
       reply_to_message_id: z.string().optional(),
       ...telegramReplyQuoteFields,
       message_thread_id: z.string().optional(),

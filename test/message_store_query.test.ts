@@ -44,18 +44,6 @@ function makeMessage(index: number, overrides: Partial<StoredMessage> = {}): Sto
   };
 }
 
-test("queryMessagesAdvanced returns columns and rows for a simple SELECT", () => {
-  const store = createStore();
-  const result = store.queryMessagesAdvanced("SELECT 1 AS ok");
-
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.columns, ["ok"]);
-  assert.deepEqual(result.rows, [{ ok: 1 }]);
-  assert.equal(result.returned_count, 1);
-  assert.equal(result.row_limit, 50);
-  assert.equal(result.truncated, false);
-});
-
 test("MessageStore persists bridge metadata", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "astral-bridge-store-"));
   const store = createStoreAt(dir);
@@ -66,68 +54,6 @@ test("MessageStore persists bridge metadata", () => {
 
   const reopened = createStoreAt(dir);
   assert.equal(reopened.getMetaValue("astral_thread_id"), "thread-1");
-});
-
-test("queryMessagesAdvanced allows semicolons inside SQL string literals", () => {
-  const store = createStore();
-  const result = store.queryMessagesAdvanced("SELECT ';' AS semicolon;");
-
-  assert.deepEqual(result.rows, [{ semicolon: ";" }]);
-});
-
-test("queryMessagesAdvanced applies default and maximum row limits outside agent SQL", () => {
-  const store = createStore();
-  for (let i = 0; i < 120; i += 1) {
-    store.saveMessage(makeMessage(i));
-  }
-
-  const defaultLimited = store.queryMessagesAdvanced("SELECT id FROM messages ORDER BY id ASC");
-  assert.equal(defaultLimited.returned_count, 50);
-  assert.equal(defaultLimited.row_limit, 50);
-  assert.equal(defaultLimited.truncated, true);
-  assert.deepEqual(defaultLimited.rows[0], { id: 1 });
-
-  const maxLimited = store.queryMessagesAdvanced("SELECT id FROM messages ORDER BY id ASC", 500);
-  assert.equal(maxLimited.returned_count, 100);
-  assert.equal(maxLimited.row_limit, 100);
-  assert.equal(maxLimited.truncated, true);
-});
-
-test("queryMessagesAdvanced rejects writes, admin statements, multiple statements, and WITH", () => {
-  const store = createStore();
-  const rejected = [
-    "INSERT INTO messages (platform_message_id) VALUES ('x')",
-    "UPDATE messages SET text = 'x'",
-    "DELETE FROM messages",
-    "DROP TABLE messages",
-    "PRAGMA table_info(messages)",
-    "ATTACH DATABASE '/tmp/x.sqlite' AS x",
-    "SELECT 1; SELECT 2",
-    "WITH x AS (SELECT 1) SELECT * FROM x",
-  ];
-
-  for (const sql of rejected) {
-    assert.throws(() => store.queryMessagesAdvanced(sql), /SELECT|WITH|statement|allowed|start/i, sql);
-  }
-});
-
-test("queryMessagesAdvanced truncates large cells and oversized results", () => {
-  const store = createStore();
-  const longText = "x".repeat(1_200);
-  for (let i = 0; i < 120; i += 1) {
-    store.saveMessage(makeMessage(i, {
-      text: longText,
-      rawMessage: longText,
-    }));
-  }
-
-  const result = store.queryMessagesAdvanced("SELECT text, raw_message FROM messages ORDER BY id ASC", 100);
-
-  assert.equal(result.truncated, true);
-  assert.ok(result.returned_count < 100);
-  assert.ok(result.notes.includes("cell text truncated"));
-  assert.ok(result.notes.includes("result size limit reached"));
-  assert.equal(String(result.rows[0]?.text).length, 503);
 });
 
 test("searchMessages uses FTS5 with Chinese bigram/trigram and mixed identifier terms", () => {
@@ -227,26 +153,4 @@ test("MessageStore rebuilds FTS for existing databases during migration", () => 
 
   const store = createStoreAt(dir);
   assert.deepEqual(store.searchMessages("telegram", "group", "-100", "电路图", 10).map((m) => m.platformMessageId), ["42"]);
-});
-
-test("queryMessagesAdvanced can join messages_fts for ranked full-text lookup", () => {
-  const store = createStore();
-  store.saveMessage(makeMessage(1, {
-    text: "图片读图失败",
-    rawMessage: "图片读图失败",
-  }));
-
-  const result = store.queryMessagesAdvanced(
-    `SELECT m.platform_message_id, m.text, bm25(messages_fts) AS rank
-     FROM messages_fts
-     JOIN messages AS m ON m.id = messages_fts.rowid
-     WHERE messages_fts MATCH '图片'
-     ORDER BY rank`,
-  );
-
-  assert.equal(result.returned_count, 1);
-  assert.deepEqual(result.columns, ["platform_message_id", "text", "rank"]);
-  assert.equal(result.rows[0]?.platform_message_id, "1");
-  assert.equal(result.rows[0]?.text, "图片读图失败");
-  assert.equal(typeof result.rows[0]?.rank, "number");
 });

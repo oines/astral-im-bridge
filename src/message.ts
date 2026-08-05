@@ -11,7 +11,6 @@ import type {
   StoredMessage,
   TriggerKind,
 } from "./types.js";
-import { QQ_REACTION_EMOJI_IDS, TELEGRAM_REACTION_EMOJIS } from "./reactions.js";
 import { extractTelegramReplyQuote } from "./telegram_quote.js";
 
 interface OutboundStoredMessageOptions {
@@ -273,7 +272,8 @@ export function buildStoredMessage(
 export function buildPokeStoredMessage(
   event: OneBotPokeNoticeEvent,
   groupInfo: GroupInfo | null,
-  trigger: Extract<TriggerKind, "group_poke" | "private_poke">,
+  trigger: Extract<TriggerKind, "group_poke" | "private_poke" | "none">,
+  botUserId: string,
 ): StoredMessage {
   const sourceType = pokeSourceType(event);
   const targetId = pokeTargetId(event);
@@ -282,9 +282,10 @@ export function buildPokeStoredMessage(
   const targetUserId = String(event.target_id);
   const time = event.time ?? Math.floor(Date.now() / 1000);
   const sender = event.sender ?? {};
+  const target = targetUserId === botUserId ? "bot" : `user ${targetUserId}`;
   const text = sourceType === "group"
-    ? `[poke] user ${userId} poked bot in group ${targetId}`
-    : `[poke] user ${userId} poked bot in private chat`;
+    ? `[poke] user ${userId} poked ${target} in group ${targetId}`
+    : `[poke] user ${userId} poked ${target} in private chat`;
 
   return {
     platform: "qq",
@@ -414,12 +415,7 @@ function buildQqAstralPrompt(message: StoredMessage): string {
   }
 
   if (message.conversationUnread) {
-    lines.push("");
-    lines.push("conversation_unread:");
-    lines.push(`unread_count: ${message.conversationUnread.unreadCount}`);
-    lines.push(
-      "note: unread_count is the number of stored QQ messages in this same conversation since the previous Astral prompt, including the current message. When you need that surrounding context, qq_get_unread_messages returns this unread batch and returns up to 100 messages by default.",
-    );
+    lines.push(`conversation_unread_count: ${message.conversationUnread.unreadCount}`);
   }
 
   lines.push("");
@@ -444,41 +440,15 @@ function buildQqAstralPrompt(message: StoredMessage): string {
   }
 
   lines.push("");
-  lines.push("history:");
+  lines.push("delivery:");
   lines.push(
-    "Use QQ MCP tools mcp__qq__qq_get_unread_messages, mcp__qq__qq_get_recent_messages, mcp__qq__qq_get_message, query_messages_advanced, or mcp__qq__qq_download_media when you need more QQ context or media content.",
-  );
-  lines.push("");
-  lines.push("reply_policy:");
-  lines.push(
-    "Normally reply to this QQ message by calling a QQ MCP send tool in the same channel it came from. Do not only output plain text: plain text is not sent to QQ, so the sender will not see it. For group messages call mcp__qq__qq_send_group_message with group_id; for private messages call mcp__qq__qq_send_private_message with sender_user_id.",
+    "Reply through the matching QQ MCP tool for this group or private conversation; ordinary assistant text is not delivered to QQ.",
   );
   if (isPoke) {
     lines.push(
-      "This poke event does not have a real QQ message id. Do not use this synthetic message_id as reply_to_message_id; if responding, send a normal message to the same group/private chat unless you choose a real message id from history.",
+      "This poke event has a synthetic message_id; do not use it as reply_to_message_id.",
     );
   }
-  lines.push(
-    "To send an image, create or reuse an image file under /workspace or /app/media, then call mcp__qq__qq_send_group_message or mcp__qq__qq_send_private_message with images: [\"/workspace/example.png\"] and optional message text. Do not just print the image path or a Markdown image; QQ users will not receive it.",
-  );
-  lines.push(
-    "To mention people inside a group message, use mcp__qq__qq_send_group_message parts in the exact order you want: {type:\"text\",text:\"...\"}, {type:\"at\",user_id:\"...\"}, {type:\"image\",file:\"/workspace/example.png\"}. Split surrounding text into separate text parts so @mentions can appear in the middle or multiple places. If you use both parts and message, parts are sent first and message is appended as the full body.",
-  );
-  lines.push(
-    "To reply to a specific QQ message, pass reply_to_message_id to mcp__qq__qq_send_group_message or mcp__qq__qq_send_private_message. You can get message ids from the current inbound message_id, mcp__qq__qq_get_recent_messages, mcp__qq__qq_get_message, or query_messages_advanced.",
-  );
-  lines.push(
-    `When a lightweight acknowledgement is enough, you may react to a QQ group message instead of sending text by calling mcp__qq__qq_set_reaction with message_id and emoji_id. QQ reactions only work in group chats. Available/common emoji_id values: ${QQ_REACTION_EMOJI_IDS}.`,
-  );
-  lines.push(
-    "To send a non-image file, create or reuse the file under /workspace or /app/media, then call mcp__qq__qq_send_group_file with group_id and file, or mcp__qq__qq_send_private_file with user_id and file. Use the name argument when you want a friendly filename.",
-  );
-  lines.push(
-    "Examples: mixed group reply => mcp__qq__qq_send_group_message({ group_id, reply_to_message_id: message_id, parts: [{type:\"text\",text:\"收到 \"},{type:\"at\",user_id:sender_user_id},{type:\"text\",text:\"，我也请 \"},{type:\"at\",user_id:\"123456\"},{type:\"text\",text:\" 看一下\"}] }); private file => mcp__qq__qq_send_private_file({ user_id: sender_user_id, file: \"/workspace/result.zip\", name: \"result.zip\" }).",
-  );
-  lines.push(
-    "When writing tool string arguments, avoid raw unescaped double quotes inside strings; use Chinese corner quotes like 「...」 or escape quotes so the tool call stays valid JSON.",
-  );
 
   return lines.join("\n");
 }
@@ -498,7 +468,6 @@ function buildTelegramAstralPrompt(message: StoredMessage): string {
   const raw = isRecord(message.rawEvent) ? message.rawEvent : {};
   const chat = isRecord(raw.chat) ? raw.chat : {};
   const from = isRecord(raw.from) ? raw.from : {};
-  const entities = Array.isArray(raw.entities) ? raw.entities : [];
   const threadId = raw.message_thread_id == null ? null : String(raw.message_thread_id);
   const lines = [
     "[Telegram inbound message]",
@@ -533,23 +502,12 @@ function buildTelegramAstralPrompt(message: StoredMessage): string {
   }
 
   if (message.conversationUnread) {
-    lines.push("");
-    lines.push("conversation_unread:");
-    lines.push(`unread_count: ${message.conversationUnread.unreadCount}`);
-    lines.push(
-      "note: unread_count is the number of stored Telegram messages in this same chat since the previous Astral prompt, including the current message. When you need that surrounding context, telegram_get_unread_messages returns this unread batch and returns up to 100 messages by default.",
-    );
+    lines.push(`conversation_unread_count: ${message.conversationUnread.unreadCount}`);
   }
 
   lines.push("");
   lines.push("content:");
   lines.push(message.rawMessage || message.text || "[non-text message]");
-
-  if (entities.length > 0) {
-    lines.push("");
-    lines.push("entities:");
-    lines.push(JSON.stringify(entities, null, 2));
-  }
 
   if (message.attachments.length > 0) {
     lines.push("");
@@ -572,35 +530,9 @@ function buildTelegramAstralPrompt(message: StoredMessage): string {
   }
 
   lines.push("");
-  lines.push("history:");
+  lines.push("delivery:");
   lines.push(
-    "Use Telegram MCP tools mcp__telegram__telegram_get_unread_messages, mcp__telegram__telegram_get_recent_messages, mcp__telegram__telegram_get_message, query_messages_advanced, or mcp__telegram__telegram_download_media when you need more Telegram context or media content.",
-  );
-  lines.push("");
-  lines.push("reply_policy:");
-  lines.push(
-    "Normally reply to this Telegram message by calling a Telegram MCP send tool in the same chat it came from. Do not only output plain text: plain text is not sent to Telegram, so the sender will not see it.",
-  );
-  lines.push(
-    "For text replies call mcp__telegram__telegram_send_message with chat_id and optional reply_to_message_id. If this inbound message has reply_quote and you want to quote the same selected text, pass reply_quote_text and usually let the bridge infer reply_quote_position_utf16. If message_thread_id is present, pass it so the reply stays in the same topic.",
-  );
-  lines.push(
-    "For structured rich text such as headings, lists, tables, collapsible details, code blocks, or formulas, call mcp__telegram__telegram_send_rich_message with chat_id and exactly one of html or markdown.",
-  );
-  lines.push(
-    "To send images or any non-text file, create or reuse a file under /workspace or /app/media, then call mcp__telegram__telegram_send_file with chat_id, file, optional caption, and optional reply_to_message_id. Images are intentionally sent as files/documents to preserve quality.",
-  );
-  lines.push(
-    "To mention people, use telegram_send_message parts in the exact order you want: {type:\"text\",text:\"...\"}, {type:\"mention\",username:\"alice\"}, or {type:\"mention\",user_id:\"123456\",text:\"Alice\"}. Use user_id mentions only when the user id is known.",
-  );
-  lines.push(
-    "To delete a Telegram message, call mcp__telegram__telegram_delete_message with chat_id and message_id. Telegram may reject deletion if the bot lacks admin permission or the message is outside Telegram's deletion rules.",
-  );
-  lines.push(
-    `When a lightweight acknowledgement is enough, you may react instead of sending text by calling mcp__telegram__telegram_set_reaction with chat_id, message_id, and emoji. Telegram reactions work in both private and group chats. Available emoji: ${TELEGRAM_REACTION_EMOJIS}.`,
-  );
-  lines.push(
-    "When writing tool string arguments, avoid raw unescaped double quotes inside strings; use Chinese corner quotes like 「...」 or escape quotes so the tool call stays valid JSON.",
+    "Reply through the matching Telegram MCP tool for this chat; ordinary assistant text is not delivered to Telegram. Preserve message_thread_id when present.",
   );
 
   return lines.join("\n");

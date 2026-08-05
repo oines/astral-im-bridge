@@ -11,7 +11,7 @@ import { TelegramClient } from "../src/telegram.ts";
 
 test("MCP exposes only configured channels and capabilities", () => {
   const none = toolNames(configFor({}));
-  assert.deepEqual(none, ["query_messages_advanced"]);
+  assert.deepEqual(none, ["query_messages"]);
 
   const qq = toolNames(configFor({
     qq: { enabled: true, botUserId: "123456" },

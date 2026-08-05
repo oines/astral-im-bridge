@@ -160,9 +160,6 @@ async function handleOneBotPoke(
   astral: AstralAppServerClient,
   event: OneBotPokeNoticeEvent,
 ): Promise<void> {
-  if (!isPokeAtBot(event, config.qq.botUserId)) {
-    return;
-  }
   if (String(event.user_id) === config.qq.botUserId) {
     return;
   }
@@ -173,11 +170,28 @@ async function handleOneBotPoke(
     return;
   }
 
+  const pokeAtBot = isPokeAtBot(event, config.qq.botUserId);
+  const trigger = pokeAtBot
+    ? sourceType === "group" ? "group_poke" : "private_poke"
+    : "none";
+  if (trigger === "none" && !config.qq.recordUntriggered) {
+    return;
+  }
+
   const groupInfo = await fetchGroupInfoForEvent(onebot, sourceType, targetId);
-  const trigger = sourceType === "group" ? "group_poke" : "private_poke";
-  const stored = buildPokeStoredMessage(event, groupInfo, trigger);
+  const stored = buildPokeStoredMessage(event, groupInfo, trigger, config.qq.botUserId);
   const messageRowId = store.saveMessage(stored);
   stored.id = messageRowId;
+  if (trigger === "none") {
+    log("stored untriggered qq poke", {
+      sourceType,
+      targetId,
+      userId: String(event.user_id),
+      targetUserId: String(event.target_id),
+    });
+    return;
+  }
+
   stored.conversationUnread = store.claimUnreadForPrompt(
     "qq",
     stored.sourceType,

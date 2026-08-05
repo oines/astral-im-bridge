@@ -364,21 +364,18 @@ model_provider = "openai"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 
-[mcp_servers.qq]
-url = "http://bridge:6710/mcp"
-
-[mcp_servers.telegram]
+[mcp_servers.bridge]
 url = "http://bridge:6710/mcp"
 ```
 
 这个部署把 Astral 放在 Docker 容器里运行，外层容器边界是主要隔离层。`sandbox_mode = "danger-full-access"` 表示 Astral turn 内部不再额外套一层文件系统 sandbox。不要把宿主机敏感目录挂进 `/workspace`。
 
-MCP endpoint 可以注册两次，分别叫 `qq` 和 `telegram`。这样工具名会更自然，例如：
+MCP endpoint 只注册一次，避免把整套工具 schema 重复暴露给模型。工具名仍然带平台前缀，例如：
 
 ```text
-mcp__qq__qq_send_group_message
-mcp__telegram__telegram_send_message
-mcp__telegram__telegram_send_rich_message
+mcp__bridge__qq_send_group_message
+mcp__bridge__telegram_send_message
+mcp__bridge__telegram_send_rich_message
 ```
 
 ## 记忆配置

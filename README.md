@@ -198,7 +198,8 @@ instead of interrupting it.
 
 `recordUntriggered` controls whether non-triggering messages from allowed conversations
 are stored. Keeping it enabled lets the agent fetch surrounding context without forwarding
-every group message into Astral.
+every group message into Astral. For QQ this also stores member-to-member poke notices in
+allowed groups; only pokes targeting the bot trigger an Astral turn.
 
 Telegram uses long polling. On startup the bridge calls `deleteWebhook` so Telegram will
 allow `getUpdates`. Send `/chatid` to the bot in a private chat, group, supergroup, or
@@ -223,11 +224,7 @@ status, recent conversations, recent stored messages, and recent bridge logs.
 For stdio MCP, build first and point Astral at the compiled entrypoint:
 
 ```toml
-[mcp_servers.qq]
-command = "node"
-args = ["/path/to/astral-bridge/dist/index.js", "--config", "/path/to/astral-bridge/config.json"]
-
-[mcp_servers.telegram]
+[mcp_servers.bridge]
 command = "node"
 args = ["/path/to/astral-bridge/dist/index.js", "--config", "/path/to/astral-bridge/config.json"]
 ```
@@ -251,20 +248,34 @@ For container or multi-process deployments, run HTTP MCP:
 Then configure Astral:
 
 ```toml
-[mcp_servers.qq]
-url = "http://bridge:6710/mcp"
-
-[mcp_servers.telegram]
+[mcp_servers.bridge]
 url = "http://bridge:6710/mcp"
 ```
 
-The bridge exposes both QQ and Telegram tools from the same MCP endpoint. Registering the
-endpoint under both `qq` and `telegram` gives the agent natural tool names such as
-`mcp__qq__qq_send_group_message` and `mcp__telegram__telegram_send_message`.
+The bridge exposes both QQ and Telegram tools from the same MCP endpoint, so register it
+once. Tool names remain platform-specific, for example
+`mcp__bridge__qq_send_group_message` and `mcp__bridge__telegram_send_message`.
 QQ tools are registered only when `qq.enabled` is true, Telegram tools only when
 `telegram.enabled` is true, and voice tools only when `tts.enabled` is true.
 
 ## MCP Tools
+
+| Shared Tool | Purpose |
+| --- | --- |
+| `query_messages` | Run isolated read-only JavaScript over QQ/TG history with `search`, `messages`, `context`, `conversations`, `sql`, and `schema` helpers. |
+
+`query_messages` is intended for complex recall and analysis rather than ordinary recent-message
+lookups. Its `code` argument is an async JavaScript function body that must return JSON. Each
+invocation runs in a separate process against a read-only SQLite connection and is terminated
+after 30 seconds. Helper `limit` values are defaults rather than hard maxima; Astral applies its
+normal MCP-output context limit after the bridge returns the result.
+
+```js
+return search("电路图", { platform: "qq", context_limit: 2 });
+```
+
+Use `schema()` from inside the query when exact table fields are needed. Use `sql()` only for
+joins, grouping, time buckets, and other shapes not covered naturally by the higher-level helpers.
 
 | QQ Tool | Purpose |
 | --- | --- |
@@ -392,8 +403,8 @@ The bridge only forwards messages from configured QQ targets or Telegram chat id
 - `/stop`: in any allowed QQ/Telegram group or private chat, interrupts the active Astral
   turn and replies in the same conversation.
 
-Every forwarded turn includes a `conversation_unread` section. `unread_count` is the
-number of stored messages in the same group/private conversation since the previous Astral
+Every forwarded turn includes `conversation_unread_count`, the number of stored messages
+in the same group/private conversation since the previous Astral
 prompt, including the current trigger message. The agent can call `qq_get_unread_messages`
 or `telegram_get_unread_messages` when that context is useful; it does not need to call it
 for every message.
