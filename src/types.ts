@@ -15,6 +15,7 @@ export interface BridgeConfig {
   onebot: OneBotConfig;
   telegram: TelegramConfig;
   tts: TtsConfig;
+  embedding: EmbeddingConfig;
   mcp: McpConfig;
   astral: AstralConfig;
   qq: QqConfig;
@@ -55,6 +56,17 @@ export interface TtsConfig {
   referenceAudioPath: string | null;
   referenceText: string | null;
   timeoutMs: number;
+}
+
+export interface EmbeddingConfig {
+  enabled: boolean;
+  baseUrl: string;
+  apiKey: string | null;
+  model: string;
+  dimensions: number;
+  batchSize: number;
+  timeoutMs: number;
+  queryInstruction: string;
 }
 
 export interface McpConfig {

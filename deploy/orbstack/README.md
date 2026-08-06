@@ -186,6 +186,59 @@ TTS_VOICE=mimo_default
 TTS_FORMAT=wav
 ```
 
+### 本机 MLX Qwen3 消息向量
+
+消息语义检索使用宿主机上的 `Qwen3-Embedding-0.6B` BF16 模型，bridge 容器只通过
+OpenAI 兼容的 `/v1/embeddings` 调用它。模型和 Python 环境都保存在宿主机，重建容器
+不会重新下载。
+
+```bash
+ROOT="$HOME/Library/Application Support/Astral/mlx-embedding"
+mkdir -p "$ROOT/models" "$HOME/Library/Logs/Astral/mlx-embedding-server"
+uv venv "$ROOT/venv" --python 3.12
+uv pip install --python "$ROOT/venv/bin/python" mlx-openai-server==1.8.1
+uv pip install --python "$ROOT/venv/bin/python" --reinstall --no-deps mlx-embeddings==0.1.0
+"$ROOT/venv/bin/python" -m mlx_embeddings.convert \
+  --hf-path Qwen/Qwen3-Embedding-0.6B \
+  --mlx-path "$ROOT/models/Qwen3-Embedding-0.6B-bf16" \
+  --dtype bfloat16
+```
+
+复制 `com.astral.mlx-embedding.plist.example` 到
+`~/Library/LaunchAgents/com.astral.mlx-embedding.plist`，把其中两个 `REPLACE_WITH_HOME`
+替换成真实的 `$HOME` 绝对路径，然后加载：
+
+```bash
+launchctl bootout "gui/$(id -u)/com.astral.mlx-embedding" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.astral.mlx-embedding.plist"
+launchctl kickstart -k "gui/$(id -u)/com.astral.mlx-embedding"
+```
+
+先在宿主机验证服务：
+
+```bash
+curl http://127.0.0.1:8766/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3-embedding-0.6b","input":["测试消息"]}'
+```
+
+确认返回 1024 维向量后再开启 bridge：
+
+```env
+EMBEDDING_ENABLED=true
+EMBEDDING_BASE_URL=http://host.docker.internal:8766/v1
+EMBEDDING_API_KEY=
+EMBEDDING_MODEL=qwen3-embedding-0.6b
+EMBEDDING_DIMENSIONS=1024
+EMBEDDING_BATCH_SIZE=32
+EMBEDDING_TIMEOUT_MS=60000
+```
+
+开启后，新消息只同步写入 SQLite 和持久化队列，后台批量生成向量；历史消息按从新到旧
+逐步回填。模型服务中断不会影响 QQ/TG 收消息和 FTS5。`query_messages` 的 `search()`
+默认变为 hybrid，也可以显式指定 `lexical` 或 `semantic`。修改模型、维度或索引文本
+版本会自动清空旧向量并重新回填。
+
 ## 端口
 
 默认 `.env.example` 里：

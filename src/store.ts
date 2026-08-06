@@ -1,9 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import * as sqliteVec from "sqlite-vec";
+import {
+  embeddingContentHash,
+  embeddingDocumentText,
+  type EmbeddingJob,
+  type EmbeddingWrite,
+} from "./embedding.js";
 import { buildFtsIndexText, buildFtsMatchQuery } from "./message_fts.js";
 import type {
   ConversationUnread,
+  EmbeddingConfig,
   Platform,
   SourceType,
   StoredAttachment,
@@ -15,14 +23,27 @@ import type {
 
 const MESSAGES_FTS_INDEX_VERSION = "1";
 const MESSAGES_FTS_META_KEY = "messages_fts_index_version";
+const MESSAGE_EMBEDDING_PROJECTION_VERSION = "1";
+const MESSAGE_EMBEDDING_META_KEY = "message_embeddings_index_version";
 
 export class MessageStore {
   private readonly db: DatabaseSync;
+  private readonly embeddingConfig: EmbeddingConfig | null;
 
-  constructor(private readonly config: StorageConfig) {
+  constructor(
+    private readonly config: StorageConfig,
+    embeddingConfig?: EmbeddingConfig,
+  ) {
     fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
     fs.mkdirSync(config.mediaDir, { recursive: true });
-    this.db = new DatabaseSync(config.dbPath);
+    this.embeddingConfig = embeddingConfig?.enabled ? embeddingConfig : null;
+    this.db = new DatabaseSync(config.dbPath, {
+      allowExtension: this.embeddingConfig !== null,
+    });
+    if (this.embeddingConfig) {
+      sqliteVec.load(this.db);
+      this.db.enableLoadExtension(false);
+    }
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
     this.migrate();
@@ -101,7 +122,161 @@ export class MessageStore {
       );
     }
     this.upsertMessageFts(row.id, message);
+    this.queueMessageEmbedding(row.id, message, 1);
     return row.id;
+  }
+
+  enqueueEmbeddingBackfill(limit: number): number {
+    if (!this.embeddingConfig) {
+      return 0;
+    }
+    const boundedLimit = Math.max(1, Math.trunc(limit));
+    const rows = this.db.prepare(`
+      SELECT m.*
+      FROM messages AS m
+      LEFT JOIN message_embeddings AS e ON e.message_row_id = m.id
+      LEFT JOIN message_embedding_jobs AS j ON j.message_row_id = m.id
+      WHERE e.message_row_id IS NULL AND j.message_row_id IS NULL
+      ORDER BY m.time DESC, m.id DESC
+      LIMIT ?
+    `).all(boundedLimit) as unknown as StoredMessageRow[];
+    let queued = 0;
+    for (const row of rows) {
+      if (this.queueMessageEmbeddingFromRow(row, 0)) {
+        queued += 1;
+      }
+    }
+    return queued;
+  }
+
+  pendingEmbeddingJobs(limit: number): EmbeddingJob[] {
+    if (!this.embeddingConfig) {
+      return [];
+    }
+    const boundedLimit = Math.max(1, Math.trunc(limit));
+    const rows = this.db.prepare(`
+      SELECT
+        j.message_row_id,
+        j.content_hash,
+        m.platform,
+        m.source_type,
+        m.target_id,
+        m.user_id,
+        m.time,
+        m.text,
+        m.raw_message
+      FROM message_embedding_jobs AS j
+      JOIN messages AS m ON m.id = j.message_row_id
+      WHERE j.next_attempt_at <= ?
+      ORDER BY j.priority DESC, m.time DESC, m.id DESC
+      LIMIT ?
+    `).all(nowUnix(), boundedLimit) as unknown as EmbeddingJobRow[];
+    return rows.map((row) => ({
+      messageRowId: row.message_row_id,
+      contentHash: row.content_hash,
+      text: embeddingDocumentText(row.text, row.raw_message),
+      platform: row.platform,
+      sourceType: row.source_type,
+      targetId: row.target_id,
+      userId: row.user_id,
+      time: row.time,
+    }));
+  }
+
+  completeEmbeddingJobs(writes: EmbeddingWrite[]): number {
+    if (!this.embeddingConfig || writes.length === 0) {
+      return 0;
+    }
+    let completed = 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.db.prepare(`
+        SELECT j.content_hash, m.text, m.raw_message
+        FROM message_embedding_jobs AS j
+        JOIN messages AS m ON m.id = j.message_row_id
+        WHERE j.message_row_id = ?
+      `);
+      const removeVector = this.db.prepare(
+        "DELETE FROM message_embeddings WHERE message_row_id = ?",
+      );
+      const insertVector = this.db.prepare(`
+        INSERT INTO message_embeddings (
+          message_row_id, embedding, platform, source_type, target_id, user_id, time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      const removeJob = this.db.prepare(
+        "DELETE FROM message_embedding_jobs WHERE message_row_id = ? AND content_hash = ?",
+      );
+      for (const write of writes) {
+        const row = current.get(write.messageRowId) as CurrentEmbeddingJobRow | undefined;
+        const currentHash = row
+          ? embeddingContentHash(embeddingDocumentText(row.text, row.raw_message))
+          : null;
+        if (!row || row.content_hash !== write.contentHash || currentHash !== write.contentHash) {
+          continue;
+        }
+        removeVector.run(write.messageRowId);
+        insertVector.run(
+          BigInt(write.messageRowId),
+          write.embedding,
+          write.platform,
+          write.sourceType,
+          write.targetId,
+          write.userId,
+          BigInt(write.time),
+        );
+        removeJob.run(write.messageRowId, write.contentHash);
+        completed += 1;
+      }
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+    return completed;
+  }
+
+  failEmbeddingJobs(jobs: EmbeddingJob[], error: string): void {
+    if (!this.embeddingConfig) {
+      return;
+    }
+    const select = this.db.prepare(
+      "SELECT attempts FROM message_embedding_jobs WHERE message_row_id = ? AND content_hash = ?",
+    );
+    const update = this.db.prepare(`
+      UPDATE message_embedding_jobs
+      SET attempts = attempts + 1, next_attempt_at = ?, last_error = ?, updated_at = ?
+      WHERE message_row_id = ? AND content_hash = ?
+    `);
+    const now = nowUnix();
+    for (const job of jobs) {
+      const row = select.get(job.messageRowId, job.contentHash) as { attempts: number } | undefined;
+      if (!row) {
+        continue;
+      }
+      const delaySeconds = Math.min(300, 5 * (2 ** Math.min(row.attempts, 6)));
+      update.run(
+        now + delaySeconds,
+        error.slice(0, 2_000),
+        now,
+        job.messageRowId,
+        job.contentHash,
+      );
+    }
+  }
+
+  embeddingIndexStats(): { indexed: number; pending: number; failed: number } {
+    if (!this.embeddingConfig) {
+      return { indexed: 0, pending: 0, failed: 0 };
+    }
+    const indexed = this.db.prepare(
+      "SELECT COUNT(*) AS count FROM message_embeddings",
+    ).get() as { count: number };
+    const jobs = this.db.prepare(`
+      SELECT COUNT(*) AS pending, COUNT(*) FILTER (WHERE attempts > 0) AS failed
+      FROM message_embedding_jobs
+    `).get() as { pending: number; failed: number };
+    return { indexed: indexed.count, pending: jobs.pending, failed: jobs.failed };
   }
 
   recentMessages(
@@ -458,6 +633,7 @@ export class MessageStore {
     this.createMessageTables();
     this.ensureConversationCursorColumns();
     this.ensureMessageFtsIndex();
+    this.ensureMessageEmbeddingIndex();
 
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_messages_conversation_time
@@ -554,6 +730,52 @@ export class MessageStore {
         tokenize = 'unicode61'
       );
     `);
+  }
+
+  private ensureMessageEmbeddingIndex(): void {
+    if (!this.embeddingConfig) {
+      return;
+    }
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS message_embedding_jobs (
+        message_row_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+        content_hash TEXT NOT NULL,
+        priority INTEGER NOT NULL DEFAULT 0,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_message_embedding_jobs_ready
+        ON message_embedding_jobs(next_attempt_at, priority, message_row_id);
+    `);
+
+    const signature = [
+      MESSAGE_EMBEDDING_PROJECTION_VERSION,
+      this.embeddingConfig.model,
+      this.embeddingConfig.dimensions,
+    ].join(":");
+    const hasTable = this.tableExists("message_embeddings");
+    if (hasTable && this.metaValue(MESSAGE_EMBEDDING_META_KEY) !== signature) {
+      this.db.exec("DROP TABLE message_embeddings");
+      this.db.exec("DELETE FROM message_embedding_jobs");
+    }
+    if (!this.tableExists("message_embeddings")) {
+      const dimensions = this.embeddingConfig.dimensions;
+      this.db.exec(`
+        CREATE VIRTUAL TABLE message_embeddings USING vec0(
+          message_row_id INTEGER PRIMARY KEY,
+          embedding float[${dimensions}] distance_metric=cosine,
+          platform TEXT,
+          source_type TEXT,
+          target_id TEXT,
+          user_id TEXT,
+          time INTEGER
+        );
+      `);
+    }
+    this.writeMetaValue(MESSAGE_EMBEDDING_META_KEY, signature);
   }
 
   private rebuildLegacyPlatformTables(): void {
@@ -736,6 +958,55 @@ export class MessageStore {
       ),
     );
   }
+
+  private queueMessageEmbedding(rowId: number, message: StoredMessage, priority: number): boolean {
+    if (!this.embeddingConfig) {
+      return false;
+    }
+    const text = embeddingDocumentText(message.text, message.rawMessage);
+    return this.writeEmbeddingJob(rowId, text, priority);
+  }
+
+  private queueMessageEmbeddingFromRow(row: StoredMessageRow, priority: number): boolean {
+    const text = embeddingDocumentText(row.text, row.raw_message);
+    return this.writeEmbeddingJob(row.id, text, priority);
+  }
+
+  private writeEmbeddingJob(rowId: number, text: string, priority: number): boolean {
+    if (!this.embeddingConfig) {
+      return false;
+    }
+    this.db.prepare("DELETE FROM message_embeddings WHERE message_row_id = ?").run(rowId);
+    if (!text) {
+      this.db.prepare("DELETE FROM message_embedding_jobs WHERE message_row_id = ?").run(rowId);
+      return false;
+    }
+    this.db.prepare(`
+      INSERT INTO message_embedding_jobs (
+        message_row_id, content_hash, priority, attempts, next_attempt_at, last_error, updated_at
+      ) VALUES (?, ?, ?, 0, 0, NULL, ?)
+      ON CONFLICT(message_row_id) DO UPDATE SET
+        content_hash = excluded.content_hash,
+        priority = MAX(message_embedding_jobs.priority, excluded.priority),
+        attempts = CASE
+          WHEN message_embedding_jobs.content_hash = excluded.content_hash
+            THEN message_embedding_jobs.attempts
+          ELSE 0
+        END,
+        next_attempt_at = CASE
+          WHEN message_embedding_jobs.content_hash = excluded.content_hash
+            THEN message_embedding_jobs.next_attempt_at
+          ELSE 0
+        END,
+        last_error = CASE
+          WHEN message_embedding_jobs.content_hash = excluded.content_hash
+            THEN message_embedding_jobs.last_error
+          ELSE NULL
+        END,
+        updated_at = excluded.updated_at
+    `).run(rowId, embeddingContentHash(text), priority, nowUnix());
+    return true;
+  }
 }
 
 interface MessageFtsSource {
@@ -782,6 +1053,24 @@ interface AttachmentRow {
   raw_json: string;
 }
 
+interface EmbeddingJobRow {
+  message_row_id: number;
+  content_hash: string;
+  platform: string;
+  source_type: string;
+  target_id: string;
+  user_id: string;
+  time: number;
+  text: string;
+  raw_message: string;
+}
+
+interface CurrentEmbeddingJobRow {
+  content_hash: string;
+  text: string;
+  raw_message: string;
+}
+
 function attachmentFromRow(row: AttachmentRow): StoredAttachment {
   return {
     id: row.id,
@@ -794,4 +1083,8 @@ function attachmentFromRow(row: AttachmentRow): StoredAttachment {
     size: row.size,
     raw: JSON.parse(row.raw_json),
   };
+}
+
+function nowUnix(): number {
+  return Math.floor(Date.now() / 1_000);
 }

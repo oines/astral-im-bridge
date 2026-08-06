@@ -2,7 +2,10 @@ import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createContext, Script } from "node:vm";
 import { DatabaseSync } from "node:sqlite";
+import * as sqliteVec from "sqlite-vec";
+import { EmbeddingClient } from "./embedding.js";
 import { buildFtsMatchQuery } from "./message_fts.js";
+import type { EmbeddingConfig } from "./types.js";
 
 export const MESSAGE_QUERY_TIMEOUT_MS = 30_000;
 
@@ -10,6 +13,7 @@ interface QueryRequest {
   dbPath: string;
   code: string;
   timeoutMs: number;
+  embedding: EmbeddingConfig | null;
 }
 
 interface QuerySuccess {
@@ -40,6 +44,7 @@ interface QueryFilters {
 }
 
 interface SearchOptions extends QueryFilters {
+  mode?: unknown;
   context_limit?: unknown;
 }
 
@@ -70,6 +75,15 @@ interface MessageRow extends Record<string, unknown> {
   reply_to_message_id: string | null;
 }
 
+interface RankedMessageRow extends MessageRow {
+  rank?: number;
+  bm25_rank?: number;
+  semantic_distance?: number;
+  rrf_score?: number;
+}
+
+type SearchMode = "lexical" | "semantic" | "hybrid";
+
 const MESSAGE_SELECT = `
   m.id AS row_id,
   m.platform,
@@ -90,12 +104,13 @@ const MESSAGE_SELECT = `
   m.reply_to_message_id
 `;
 
-const QUERY_TABLES = ["messages", "attachments", "messages_fts"] as const;
+const BASE_QUERY_TABLES = ["messages", "attachments", "messages_fts"] as const;
 
 export function runMessageQuery(
   dbPath: string,
   code: string,
   timeoutMs = MESSAGE_QUERY_TIMEOUT_MS,
+  embeddingConfig?: EmbeddingConfig,
 ): Promise<unknown> {
   if (!code.trim()) {
     return Promise.reject(new Error("Query code must not be empty"));
@@ -160,7 +175,12 @@ export function runMessageQuery(
       });
     });
 
-    child.send({ dbPath, code, timeoutMs } satisfies QueryRequest, (err) => {
+    child.send({
+      dbPath,
+      code,
+      timeoutMs,
+      embedding: embeddingConfig?.enabled ? embeddingConfig : null,
+    } satisfies QueryRequest, (err) => {
       if (err) {
         finish(() => reject(err));
       }
@@ -195,11 +215,18 @@ function childExecArgv(): string[] {
 }
 
 async function executeQuery(request: QueryRequest): Promise<unknown> {
-  const db = new DatabaseSync(request.dbPath, { readOnly: true });
+  const db = new DatabaseSync(request.dbPath, {
+    readOnly: true,
+    allowExtension: request.embedding !== null,
+  });
   try {
+    if (request.embedding) {
+      sqliteVec.load(db);
+      db.enableLoadExtension(false);
+    }
     db.exec("PRAGMA query_only = ON");
     db.exec("PRAGMA busy_timeout = 5000");
-    const helpers = createQueryHelpers(db);
+    const helpers = createQueryHelpers(db, request.embedding);
     const sandbox = Object.create(null) as Record<string, unknown>;
     for (const [name, helper] of Object.entries(helpers)) {
       Object.defineProperty(sandbox, name, {
@@ -226,39 +253,166 @@ async function executeQuery(request: QueryRequest): Promise<unknown> {
   }
 }
 
-function createQueryHelpers(db: DatabaseSync): Record<string, (...args: never[]) => unknown> {
-  return Object.freeze({
-    search: ((text: string, options: SearchOptions = {}) => searchMessages(db, text, options)) as (...args: never[]) => unknown,
+function createQueryHelpers(
+  db: DatabaseSync,
+  embeddingConfig: EmbeddingConfig | null,
+): Record<string, (...args: never[]) => unknown> {
+  const helpers: Record<string, (...args: never[]) => unknown> = {
+    search: ((text: string, options: SearchOptions = {}) => searchMessages(
+      db,
+      text,
+      options,
+      embeddingConfig,
+    )) as (...args: never[]) => unknown,
     messages: ((options: QueryFilters = {}) => queryMessages(db, options)) as (...args: never[]) => unknown,
     context: ((rowId: number, options: ContextOptions = {}) => messageContext(db, rowId, options)) as (...args: never[]) => unknown,
     conversations: ((options: ConversationOptions = {}) => queryConversations(db, options)) as (...args: never[]) => unknown,
     sql: ((query: string, ...params: unknown[]) => querySql(db, query, params)) as (...args: never[]) => unknown,
-    schema: ((table?: string) => querySchema(db, table)) as (...args: never[]) => unknown,
-  });
+    schema: ((table?: string) => querySchema(db, table, embeddingConfig !== null)) as (...args: never[]) => unknown,
+  };
+  if (embeddingConfig) {
+    const client = new EmbeddingClient(embeddingConfig);
+    helpers.embed = (async (text: string) => client.embedQuery(text)) as (...args: never[]) => unknown;
+  }
+  return Object.freeze(helpers);
 }
 
-function searchMessages(db: DatabaseSync, text: string, rawOptions: SearchOptions): Record<string, unknown> {
+function searchMessages(
+  db: DatabaseSync,
+  text: string,
+  rawOptions: SearchOptions,
+  embeddingConfig: EmbeddingConfig | null,
+): Record<string, unknown> | Promise<Record<string, unknown>> {
   if (typeof text !== "string" || !text.trim()) {
     throw new Error("search(text, opts) requires non-empty text");
   }
   const options = requireOptions(rawOptions, "search options") as SearchOptions;
   const limit = positiveInteger(options.limit, 20, "search limit");
   const contextLimit = nonNegativeInteger(options.context_limit, 1, "context_limit");
+  const mode = searchMode(options.mode, embeddingConfig !== null);
+  if (mode === "lexical") {
+    const rows = lexicalSearchRows(db, text, options, limit);
+    return searchResult(db, text, mode, rows, contextLimit);
+  }
+  if (!embeddingConfig) {
+    throw new Error(
+      `search mode ${mode} requires embedding.enabled=true and a working embedding service`,
+    );
+  }
+  return semanticSearchResult(db, text, options, limit, contextLimit, mode, embeddingConfig);
+}
+
+function lexicalSearchRows(
+  db: DatabaseSync,
+  text: string,
+  options: SearchOptions,
+  limit: number,
+): RankedMessageRow[] {
+  const matchQuery = buildFtsMatchQuery(text);
+  if (!matchQuery) {
+    return [];
+  }
   const clauses = ["messages_fts MATCH ?"];
-  const params: SqlValue[] = [buildFtsMatchQuery(text)];
+  const params: SqlValue[] = [matchQuery];
   appendMessageFilters(clauses, params, options, "m");
 
-  const rows = db.prepare(
-    `SELECT ${MESSAGE_SELECT}, bm25(messages_fts) AS rank
+  return db.prepare(
+    `SELECT ${MESSAGE_SELECT}, bm25(messages_fts) AS rank, bm25(messages_fts) AS bm25_rank
      FROM messages_fts
      JOIN messages AS m ON m.id = messages_fts.rowid
      WHERE ${clauses.join(" AND ")}
-     ORDER BY rank ASC, m.time DESC, m.id DESC
+     ORDER BY bm25_rank ASC, m.time DESC, m.id DESC
      LIMIT ?`,
-  ).all(...params, limit) as unknown as MessageRow[];
+  ).all(...params, limit) as unknown as RankedMessageRow[];
+}
 
+async function semanticSearchResult(
+  db: DatabaseSync,
+  text: string,
+  options: SearchOptions,
+  limit: number,
+  contextLimit: number,
+  mode: "semantic" | "hybrid",
+  embeddingConfig: EmbeddingConfig,
+): Promise<Record<string, unknown>> {
+  const vector = await new EmbeddingClient(embeddingConfig).embedQuery(text);
+  if (mode === "semantic") {
+    const rows = semanticSearchRows(db, vector, options, limit);
+    return searchResult(db, text, mode, rows, contextLimit);
+  }
+  const candidateLimit = limit > Math.floor(Number.MAX_SAFE_INTEGER / 4)
+    ? Number.MAX_SAFE_INTEGER
+    : Math.max(50, limit * 4);
+  const lexical = lexicalSearchRows(db, text, options, candidateLimit);
+  const semantic = semanticSearchRows(db, vector, options, candidateLimit);
+  const combined = new Map<number, RankedMessageRow & { lexical_order?: number; semantic_order?: number }>();
+  lexical.forEach((row, index) => {
+    combined.set(row.row_id, { ...row, lexical_order: index + 1 });
+  });
+  semantic.forEach((row, index) => {
+    const existing = combined.get(row.row_id);
+    combined.set(row.row_id, {
+      ...(existing ?? row),
+      semantic_distance: row.semantic_distance,
+      semantic_order: index + 1,
+    });
+  });
+  const rows = [...combined.values()]
+    .map((row) => {
+      const rrfScore = (row.lexical_order ? 1.2 / (60 + row.lexical_order) : 0)
+        + (row.semantic_order ? 1 / (60 + row.semantic_order) : 0);
+      const { lexical_order: _lexicalOrder, semantic_order: _semanticOrder, ...fields } = row;
+      return { ...fields, rrf_score: rrfScore };
+    })
+    .sort((a, b) => (
+      (b.rrf_score ?? 0) - (a.rrf_score ?? 0)
+      || b.time_unix - a.time_unix
+      || b.row_id - a.row_id
+    ))
+    .slice(0, limit);
+  return searchResult(db, text, mode, rows, contextLimit);
+}
+
+function semanticSearchRows(
+  db: DatabaseSync,
+  vector: Uint8Array,
+  options: SearchOptions,
+  limit: number,
+): RankedMessageRow[] {
+  const clauses = ["e.embedding MATCH ?", "e.k = ?"];
+  const params: SqlValue[] = [vector, limit];
+  appendStringFilter(clauses, params, "e.platform", options.platform, "platform", ["qq", "telegram"]);
+  appendStringFilter(
+    clauses,
+    params,
+    "e.source_type",
+    options.source_type,
+    "source_type",
+    ["group", "private"],
+  );
+  appendStringFilter(clauses, params, "e.target_id", options.target_id, "target_id");
+  appendStringFilter(clauses, params, "e.user_id", options.user_id, "user_id");
+  appendTimeFilter(clauses, params, "e.time", ">=", options.after, "after");
+  appendTimeFilter(clauses, params, "e.time", "<=", options.before, "before");
+  return db.prepare(
+    `SELECT ${MESSAGE_SELECT}, e.distance AS semantic_distance
+     FROM message_embeddings AS e
+     JOIN messages AS m ON m.id = e.message_row_id
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY e.distance ASC, m.time DESC, m.id DESC`,
+  ).all(...params) as unknown as RankedMessageRow[];
+}
+
+function searchResult(
+  db: DatabaseSync,
+  text: string,
+  mode: SearchMode,
+  rows: RankedMessageRow[],
+  contextLimit: number,
+): Record<string, unknown> {
   return {
     query: text,
+    mode,
     returned_count: rows.length,
     hits: rows.map((row) => {
       if (contextLimit === 0) {
@@ -272,6 +426,16 @@ function searchMessages(db: DatabaseSync, text: string, rawOptions: SearchOption
       };
     }),
   };
+}
+
+function searchMode(value: unknown, embeddingEnabled: boolean): SearchMode {
+  if (value === undefined) {
+    return embeddingEnabled ? "hybrid" : "lexical";
+  }
+  if (value === "lexical" || value === "semantic" || value === "hybrid") {
+    return value;
+  }
+  throw new Error("search mode must be lexical, semantic, or hybrid");
 }
 
 function queryMessages(db: DatabaseSync, rawOptions: QueryFilters): MessageRow[] {
@@ -405,20 +569,33 @@ function querySql(db: DatabaseSync, query: string, rawParams: unknown[]): Record
   return db.prepare(normalized).all(...params) as Record<string, unknown>[];
 }
 
-function querySchema(db: DatabaseSync, requestedTable?: string): Record<string, unknown> {
+function querySchema(
+  db: DatabaseSync,
+  requestedTable: string | undefined,
+  embeddingEnabled: boolean,
+): Record<string, unknown> {
   if (requestedTable !== undefined && typeof requestedTable !== "string") {
     throw new Error("schema(table) expects a table name string");
   }
-  const names = requestedTable ? [requestedTable] : [...QUERY_TABLES];
+  const queryTables = embeddingEnabled
+    ? [...BASE_QUERY_TABLES, "message_embeddings"]
+    : [...BASE_QUERY_TABLES];
+  const names = requestedTable ? [requestedTable] : queryTables;
   for (const name of names) {
-    if (!QUERY_TABLES.includes(name as (typeof QUERY_TABLES)[number])) {
-      throw new Error(`Unknown query table ${name}; available tables: ${QUERY_TABLES.join(", ")}`);
+    if (!queryTables.includes(name)) {
+      throw new Error(`Unknown query table ${name}; available tables: ${queryTables.join(", ")}`);
     }
   }
   const tables = names.map((name) => {
     const columns = db.prepare(`PRAGMA table_info(${name})`).all() as Array<Record<string, unknown>>;
     if (name === "messages_fts") {
       columns.unshift({ cid: -1, name: "rowid", type: "INTEGER", notnull: 0, dflt_value: null, pk: 1 });
+    }
+    if (name === "message_embeddings") {
+      columns.push(
+        { cid: -1, name: "distance", type: "REAL", notnull: 0, dflt_value: null, pk: 0 },
+        { cid: -2, name: "k", type: "INTEGER", notnull: 0, dflt_value: null, pk: 0 },
+      );
     }
     return {
       name,
@@ -433,13 +610,24 @@ function querySchema(db: DatabaseSync, requestedTable?: string): Record<string, 
   return {
     tables,
     helpers: {
-      search: "search(text, {platform?, source_type?, target_id?, user_id?, after?, before?, limit=20, context_limit=1})",
+      search: embeddingEnabled
+        ? "await search(text, {mode='hybrid'|'lexical'|'semantic', platform?, source_type?, target_id?, user_id?, after?, before?, limit=20, context_limit=1})"
+        : "search(text, {platform?, source_type?, target_id?, user_id?, after?, before?, limit=20, context_limit=1})",
       messages: "messages({platform?, source_type?, target_id?, user_id?, message_id?, reply_to_message_id?, trigger?, after?, before?, has_attachments?, order='desc', limit=50})",
       context: "context(row_id, {before=10, after=10, reply_depth=5})",
       conversations: "conversations({platform?, source_type?, target_id?, user_id?, after?, before?, min_messages=1, limit=50})",
       sql: "sql(query, ...params) for one read-only SELECT or WITH query",
+      ...(embeddingEnabled
+        ? { embed: "await embed(text) returns a binary float32 query vector accepted by sql()" }
+        : {}),
       schema: "schema(table?)",
     },
+    ...(embeddingEnabled
+      ? {
+          vector_query:
+            "const v = await embed(text); sql('SELECT message_row_id, distance FROM message_embeddings WHERE embedding MATCH ? AND k = ?', v, limit)",
+        }
+      : {}),
     time_format: "messages.time and helper time fields are Unix seconds; after/before also accept ISO-8601 strings",
   };
 }

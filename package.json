@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "sqlite-vec": "0.1.8",
     "ws": "^8.21.0",
     "zod": "^4.4.3"
   },

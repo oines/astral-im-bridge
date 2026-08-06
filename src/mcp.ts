@@ -13,7 +13,7 @@ import { registerGroupAdminTools } from "./group_admin_tools.js";
 import { error, log, warn } from "./logger.js";
 import { downloadAttachmentFromUrl, ensureAttachmentDownloaded, writeMediaFile } from "./media.js";
 import { buildOutboundStoredMessage, replySegmentMessageId, sanitizeCqMessage } from "./message.js";
-import { runMessageQuery } from "./message_query.js";
+import { MESSAGE_QUERY_TIMEOUT_MS, runMessageQuery } from "./message_query.js";
 import type { OneBotClient } from "./onebot.js";
 import { QQ_REACTION_EMOJI_IDS, TELEGRAM_REACTION_EMOJIS } from "./reactions.js";
 import type { MessageStore } from "./store.js";
@@ -49,6 +49,23 @@ Message helpers return row_id as the stable internal id accepted by context(). T
 Examples:
 return search("电路图", { platform: "qq", context_limit: 2 });
 const rows = sql("SELECT user_id, COUNT(*) AS count FROM messages WHERE target_id = ? GROUP BY user_id ORDER BY count DESC", "728563593"); return rows;`;
+
+const MESSAGE_QUERY_EMBEDDING_TOOL_DESCRIPTION = `Run JavaScript over stored QQ and Telegram history using a read-only query environment. Use ordinary recent, unread, and get-message tools for simple lookups; use this tool for cross-chat recall, semantic or full-text discovery, reply/context analysis, attachment lookup, timelines, and custom aggregation.
+
+The code is the body of an async function and must return a JSON-serializable value. Available helpers:
+- search(text, opts?): message search. mode is lexical, semantic, or hybrid (default). Hybrid combines Chinese FTS5/BM25 and semantic similarity. Other options: platform, source_type, target_id, user_id, after, before, limit (default 20), context_limit (default 1). Use await for semantic or hybrid searches.
+- embed(text): return a binary float32 query vector for sql(); use await.
+- messages(opts?): filter messages by platform, source_type, target_id, user_id, message_id, reply_to_message_id, trigger, after, before, has_attachments, order (asc/desc), and limit (default 50).
+- context(row_id, opts?): get the target message, attachments, reply chain, and nearby messages. Options: before (default 10), after (default 10), reply_depth (default 5).
+- conversations(opts?): aggregate conversations by platform/source_type/target_id. Options: platform, source_type, target_id, user_id, after, before, min_messages, limit (default 50).
+- sql(query, ...params): run one read-only SELECT or WITH query for custom joins, sqlite-vec KNN, and aggregations.
+- schema(table?): inspect messages, attachments, messages_fts, message_embeddings, and helper signatures.
+
+Message helpers return row_id as the stable internal id accepted by context(). Time fields are Unix seconds; after/before accept Unix seconds or ISO-8601 strings. Helper limits are defaults, not maximums. Semantic and hybrid modes report an error if the local embedding service is unavailable; explicitly use mode: "lexical" when semantic recall is not required.
+
+Examples:
+return await search("上次谁说显卡坏了", { mode: "hybrid", platform: "qq", context_limit: 2 });
+const v = await embed("串流画面问题"); return sql("SELECT m.id AS row_id, m.text, e.distance FROM message_embeddings AS e JOIN messages AS m ON m.id = e.message_row_id WHERE e.embedding MATCH ? AND e.k = ? AND e.platform = ? ORDER BY e.distance", v, 20, "qq");`;
 
 const outboundPartSchema = z.object({
   type: z.enum(["text", "at", "image"]).describe("Part kind."),
@@ -221,7 +238,9 @@ export function createBridgeMcpServer(
 
   server.tool(
     "query_messages",
-    MESSAGE_QUERY_TOOL_DESCRIPTION,
+    config.embedding.enabled
+      ? MESSAGE_QUERY_EMBEDDING_TOOL_DESCRIPTION
+      : MESSAGE_QUERY_TOOL_DESCRIPTION,
     {
       code: z.string().trim().min(1).describe(
         "Async JavaScript function body. Use the provided helpers and finish with return <json_value>.",
@@ -229,7 +248,12 @@ export function createBridgeMcpServer(
     },
     async (args) => {
       try {
-        return structuredCompact(await runMessageQuery(config.storage.dbPath, args.code));
+        return structuredCompact(await runMessageQuery(
+          config.storage.dbPath,
+          args.code,
+          MESSAGE_QUERY_TIMEOUT_MS,
+          config.embedding,
+        ));
       } catch (err) {
         return {
           ...structuredCompact({

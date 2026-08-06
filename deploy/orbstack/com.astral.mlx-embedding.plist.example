@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.astral.mlx-embedding</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_WITH_HOME/Library/Application Support/Astral/mlx-embedding/venv/bin/mlx-openai-server</string>
+    <string>launch</string>
+    <string>--model-type</string>
+    <string>embeddings</string>
+    <string>--model-path</string>
+    <string>REPLACE_WITH_HOME/Library/Application Support/Astral/mlx-embedding/models/Qwen3-Embedding-0.6B-bf16</string>
+    <string>--served-model-name</string>
+    <string>qwen3-embedding-0.6b</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8766</string>
+    <string>--log-file</string>
+    <string>REPLACE_WITH_HOME/Library/Logs/Astral/mlx-embedding-server/server.log</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>REPLACE_WITH_HOME</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>REPLACE_WITH_HOME/Library/Logs/Astral/mlx-embedding-server/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>REPLACE_WITH_HOME/Library/Logs/Astral/mlx-embedding-server/stderr.log</string>
+  <key>WorkingDirectory</key>
+  <string>REPLACE_WITH_HOME/Library/Application Support/Astral/mlx-embedding</string>
+</dict>
+</plist>

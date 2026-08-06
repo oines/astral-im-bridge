@@ -35,6 +35,17 @@ const defaultConfig: BridgeConfig = {
     referenceText: null,
     timeoutMs: 60_000,
   },
+  embedding: {
+    enabled: false,
+    baseUrl: "http://127.0.0.1:8766/v1",
+    apiKey: null,
+    model: "qwen3-embedding-0.6b",
+    dimensions: 1024,
+    batchSize: 32,
+    timeoutMs: 60_000,
+    queryInstruction:
+      "Given a user query about instant-message history, retrieve messages that answer the query or express the same meaning.",
+  },
   mcp: {
     transport: "stdio",
     host: "127.0.0.1",
@@ -110,6 +121,7 @@ function mergeConfig(base: BridgeConfig, patch: Partial<BridgeConfig>): BridgeCo
     onebot: { ...base.onebot, ...patch.onebot },
     telegram: { ...base.telegram, ...patch.telegram },
     tts: { ...base.tts, ...patch.tts },
+    embedding: { ...base.embedding, ...patch.embedding },
     mcp: { ...base.mcp, ...patch.mcp },
     astral: { ...base.astral, ...patch.astral },
     qq: { ...base.qq, ...patch.qq },
@@ -182,6 +194,26 @@ function applyEnvOverrides(config: BridgeConfig): void {
     envString("ASTRAL_BRIDGE_TTS_REFERENCE_TEXT") ?? config.tts.referenceText;
   config.tts.timeoutMs =
     parsePositiveInteger(process.env.ASTRAL_BRIDGE_TTS_TIMEOUT_MS) ?? config.tts.timeoutMs;
+  config.embedding.enabled =
+    parseBoolean(process.env.ASTRAL_BRIDGE_EMBEDDING_ENABLED) ?? config.embedding.enabled;
+  config.embedding.baseUrl =
+    envString("ASTRAL_BRIDGE_EMBEDDING_BASE_URL") ?? config.embedding.baseUrl;
+  config.embedding.apiKey =
+    envString("ASTRAL_BRIDGE_EMBEDDING_API_KEY") ?? config.embedding.apiKey;
+  config.embedding.model =
+    envString("ASTRAL_BRIDGE_EMBEDDING_MODEL") ?? config.embedding.model;
+  config.embedding.dimensions =
+    parsePositiveInteger(process.env.ASTRAL_BRIDGE_EMBEDDING_DIMENSIONS)
+    ?? config.embedding.dimensions;
+  config.embedding.batchSize =
+    parsePositiveInteger(process.env.ASTRAL_BRIDGE_EMBEDDING_BATCH_SIZE)
+    ?? config.embedding.batchSize;
+  config.embedding.timeoutMs =
+    parsePositiveInteger(process.env.ASTRAL_BRIDGE_EMBEDDING_TIMEOUT_MS)
+    ?? config.embedding.timeoutMs;
+  config.embedding.queryInstruction =
+    envString("ASTRAL_BRIDGE_EMBEDDING_QUERY_INSTRUCTION")
+    ?? config.embedding.queryInstruction;
   config.mcp.transport = parseMcpTransport(process.env.ASTRAL_BRIDGE_MCP_TRANSPORT) ?? config.mcp.transport;
   config.externalEvents.enabled =
     parseBoolean(process.env.ASTRAL_BRIDGE_EVENT_API_ENABLED) ?? config.externalEvents.enabled;
@@ -247,6 +279,27 @@ function validateConfig(config: BridgeConfig): void {
   if (!Number.isInteger(config.tts.timeoutMs) || config.tts.timeoutMs <= 0) {
     throw new Error("tts.timeoutMs must be a positive integer");
   }
+  if (
+    !config.embedding.baseUrl.startsWith("http://")
+    && !config.embedding.baseUrl.startsWith("https://")
+  ) {
+    throw new Error("embedding.baseUrl must be an http(s) URL");
+  }
+  if (config.embedding.enabled && !config.embedding.model.trim()) {
+    throw new Error("embedding.model is required when embedding.enabled is true");
+  }
+  if (!Number.isInteger(config.embedding.dimensions) || config.embedding.dimensions <= 0) {
+    throw new Error("embedding.dimensions must be a positive integer");
+  }
+  if (!Number.isInteger(config.embedding.batchSize) || config.embedding.batchSize <= 0) {
+    throw new Error("embedding.batchSize must be a positive integer");
+  }
+  if (!Number.isInteger(config.embedding.timeoutMs) || config.embedding.timeoutMs <= 0) {
+    throw new Error("embedding.timeoutMs must be a positive integer");
+  }
+  if (!config.embedding.queryInstruction.trim()) {
+    throw new Error("embedding.queryInstruction must not be empty");
+  }
   if (!Number.isInteger(config.mcp.port) || config.mcp.port <= 0) {
     throw new Error("mcp.port must be a positive integer");
   }
@@ -289,6 +342,10 @@ function validateConfig(config: BridgeConfig): void {
   config.tts.language = normalizeOptionalString(config.tts.language);
   config.tts.referenceAudioPath = normalizeOptionalString(config.tts.referenceAudioPath);
   config.tts.referenceText = normalizeOptionalString(config.tts.referenceText);
+  config.embedding.apiKey = normalizeOptionalString(config.embedding.apiKey);
+  config.embedding.baseUrl = String(config.embedding.baseUrl).replace(/\/+$/, "");
+  config.embedding.model = String(config.embedding.model).trim();
+  config.embedding.queryInstruction = String(config.embedding.queryInstruction).trim();
   config.astral.modelConfigPath = normalizeOptionalString(config.astral.modelConfigPath);
   config.astral.modelProvider = normalizeOptionalString(config.astral.modelProvider);
   config.astral.model = normalizeOptionalString(config.astral.model);

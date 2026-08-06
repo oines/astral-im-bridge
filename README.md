@@ -127,6 +127,16 @@ Start from `examples/config.example.json`:
     "referenceText": "参考音频中准确说出的文字",
     "timeoutMs": 60000
   },
+  "embedding": {
+    "enabled": false,
+    "baseUrl": "http://127.0.0.1:8766/v1",
+    "apiKey": null,
+    "model": "qwen3-embedding-0.6b",
+    "dimensions": 1024,
+    "batchSize": 32,
+    "timeoutMs": 60000,
+    "queryInstruction": "Given a user query about instant-message history, retrieve messages that answer the query or express the same meaning."
+  },
   "externalEvents": {
     "enabled": true,
     "path": "/api/events",
@@ -182,6 +192,14 @@ Environment overrides:
 | `ASTRAL_BRIDGE_TTS_REFERENCE_AUDIO_PATH` | Optional reference audio path as seen by the TTS server. |
 | `ASTRAL_BRIDGE_TTS_REFERENCE_TEXT` | Exact transcript of the reference audio; must be configured together with its path. |
 | `ASTRAL_BRIDGE_TTS_TIMEOUT_MS` | TTS request timeout in milliseconds. |
+| `ASTRAL_BRIDGE_EMBEDDING_ENABLED` | Enable asynchronous message embeddings and semantic/hybrid `query_messages` search. |
+| `ASTRAL_BRIDGE_EMBEDDING_BASE_URL` | OpenAI-compatible embeddings API base URL, including `/v1`. |
+| `ASTRAL_BRIDGE_EMBEDDING_API_KEY` | Optional bearer token for the embeddings API. |
+| `ASTRAL_BRIDGE_EMBEDDING_MODEL` | Embedding model id sent to the configured endpoint. |
+| `ASTRAL_BRIDGE_EMBEDDING_DIMENSIONS` | Stored vector dimensions. Changing this rebuilds the vector index. |
+| `ASTRAL_BRIDGE_EMBEDDING_BATCH_SIZE` | Maximum messages embedded in one background request. |
+| `ASTRAL_BRIDGE_EMBEDDING_TIMEOUT_MS` | Embedding request timeout in milliseconds. |
+| `ASTRAL_BRIDGE_EMBEDDING_QUERY_INSTRUCTION` | Retrieval instruction prepended to semantic search queries. |
 | `ASTRAL_BRIDGE_MCP_TRANSPORT` | `stdio` or `http`. |
 | `ASTRAL_BRIDGE_EVENT_API_ENABLED` | Enable or disable the external event API. |
 | `ASTRAL_BRIDGE_EVENT_API_PATH` | External event API path, default `/api/events`. |
@@ -262,7 +280,7 @@ QQ tools are registered only when `qq.enabled` is true, Telegram tools only when
 
 | Shared Tool | Purpose |
 | --- | --- |
-| `query_messages` | Run isolated read-only JavaScript over QQ/TG history with `search`, `messages`, `context`, `conversations`, `sql`, and `schema` helpers. |
+| `query_messages` | Run isolated read-only JavaScript over QQ/TG history with `search`, `messages`, `context`, `conversations`, `sql`, and `schema`; embedding-enabled deployments also expose `embed`. |
 
 `query_messages` is intended for complex recall and analysis rather than ordinary recent-message
 lookups. Its `code` argument is an async JavaScript function body that must return JSON. Each
@@ -273,6 +291,30 @@ normal MCP-output context limit after the bridge returns the result.
 ```js
 return search("电路图", { platform: "qq", context_limit: 2 });
 ```
+
+When embeddings are enabled, `search()` defaults to hybrid FTS5 plus semantic recall. Semantic
+and hybrid searches are asynchronous, while explicit lexical searches retain the synchronous
+FTS5 path:
+
+```js
+return await search("上次谁说显卡坏了", { mode: "hybrid", platform: "qq", context_limit: 2 });
+```
+
+For custom KNN joins, use `await embed(text)` and bind the returned float32 vector directly to
+`sql()`. The vector is never printed into the tool result:
+
+```js
+const vector = await embed("串流画面问题");
+return sql(
+  "SELECT m.id AS row_id, m.text, e.distance FROM message_embeddings e JOIN messages m ON m.id = e.message_row_id WHERE e.embedding MATCH ? AND e.k = ? ORDER BY e.distance",
+  vector,
+  20,
+);
+```
+
+Message writes and FTS5 updates never wait for the embedding service. New and historical
+messages are queued in SQLite and indexed in the background. If the local model is unavailable,
+semantic/hybrid calls return a clear error and `mode: "lexical"` remains available.
 
 Use `schema()` from inside the query when exact table fields are needed. Use `sql()` only for
 joins, grouping, time buckets, and other shapes not covered naturally by the higher-level helpers.

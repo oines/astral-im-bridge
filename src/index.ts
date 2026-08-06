@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { loadConfig } from "./config.js";
 import { AstralAppServerClient } from "./astral.js";
+import { EmbeddingIndexer } from "./embedding.js";
 import { log, warn, error } from "./logger.js";
 import {
   buildPokeStoredMessage,
@@ -35,7 +36,9 @@ const STOP_TURN_COMMAND = "/stop";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const store = new MessageStore(config.storage);
+  const store = new MessageStore(config.storage, config.embedding);
+  const embeddingIndexer = new EmbeddingIndexer(config.embedding, store);
+  embeddingIndexer.start();
   const onebot = new OneBotClient(config.onebot);
   const telegram = config.telegram.enabled ? new TelegramClient(config.telegram) : null;
   const astral = new AstralAppServerClient(config.astral, store);

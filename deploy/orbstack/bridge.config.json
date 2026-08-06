@@ -57,6 +57,16 @@
     "referenceText": null,
     "timeoutMs": 60000
   },
+  "embedding": {
+    "enabled": false,
+    "baseUrl": "http://host.docker.internal:8766/v1",
+    "apiKey": null,
+    "model": "qwen3-embedding-0.6b",
+    "dimensions": 1024,
+    "batchSize": 32,
+    "timeoutMs": 60000,
+    "queryInstruction": "Given a user query about instant-message history, retrieve messages that answer the query or express the same meaning."
+  },
   "externalEvents": {
     "enabled": true,
     "path": "/api/events",
