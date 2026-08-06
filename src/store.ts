@@ -5,6 +5,7 @@ import * as sqliteVec from "sqlite-vec";
 import {
   embeddingContentHash,
   embeddingDocumentText,
+  type EmbeddingBackfillResult,
   type EmbeddingJob,
   type EmbeddingWrite,
 } from "./embedding.js";
@@ -25,6 +26,9 @@ const MESSAGES_FTS_INDEX_VERSION = "1";
 const MESSAGES_FTS_META_KEY = "messages_fts_index_version";
 const MESSAGE_EMBEDDING_PROJECTION_VERSION = "1";
 const MESSAGE_EMBEDDING_META_KEY = "message_embeddings_index_version";
+const MESSAGE_EMBEDDING_SCHEDULER_VERSION = "1";
+const MESSAGE_EMBEDDING_SCHEDULER_META_KEY = "message_embeddings_scheduler_version";
+const MESSAGE_EMBEDDING_BACKFILL_CURSOR_META_KEY = "message_embeddings_backfill_cursor";
 
 export class MessageStore {
   private readonly db: DatabaseSync;
@@ -126,27 +130,70 @@ export class MessageStore {
     return row.id;
   }
 
-  enqueueEmbeddingBackfill(limit: number): number {
+  enqueueEmbeddingBackfill(limit: number): EmbeddingBackfillResult {
     if (!this.embeddingConfig) {
-      return 0;
+      return { queued: 0, scanned: 0, complete: true };
     }
-    const boundedLimit = Math.max(1, Math.trunc(limit));
-    const rows = this.db.prepare(`
-      SELECT m.*
-      FROM messages AS m
-      LEFT JOIN message_embeddings AS e ON e.message_row_id = m.id
-      LEFT JOIN message_embedding_jobs AS j ON j.message_row_id = m.id
-      WHERE e.message_row_id IS NULL AND j.message_row_id IS NULL
-      ORDER BY m.time DESC, m.id DESC
-      LIMIT ?
-    `).all(boundedLimit) as unknown as StoredMessageRow[];
-    let queued = 0;
-    for (const row of rows) {
-      if (this.queueMessageEmbeddingFromRow(row, 0)) {
-        queued += 1;
+    const boundedLimit = Math.min(1_000, Math.max(1, Math.trunc(limit)));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const cursor = Number(this.metaValue(MESSAGE_EMBEDDING_BACKFILL_CURSOR_META_KEY) ?? "0");
+      if (!Number.isSafeInteger(cursor) || cursor <= 0) {
+        this.db.exec("COMMIT");
+        return { queued: 0, scanned: 0, complete: true };
       }
+
+      const rows = this.db.prepare(`
+        SELECT *
+        FROM messages
+        WHERE id < ?
+        ORDER BY id DESC
+        LIMIT ?
+      `).all(cursor, boundedLimit) as unknown as StoredMessageRow[];
+      if (rows.length === 0) {
+        this.writeMetaValue(MESSAGE_EMBEDDING_BACKFILL_CURSOR_META_KEY, "0");
+        this.db.exec("COMMIT");
+        return { queued: 0, scanned: 0, complete: true };
+      }
+
+      const rowIds = rows.map((row) => row.id);
+      const placeholders = rowIds.map(() => "?").join(", ");
+      const indexedRows = this.db.prepare(`
+        SELECT message_row_id
+        FROM message_embedding_state
+        WHERE message_row_id IN (${placeholders})
+      `).all(...rowIds) as unknown as Array<{ message_row_id: number }>;
+      const queuedRows = this.db.prepare(`
+        SELECT message_row_id
+        FROM message_embedding_jobs
+        WHERE message_row_id IN (${placeholders})
+      `).all(...rowIds) as unknown as Array<{ message_row_id: number }>;
+      const covered = new Set([
+        ...indexedRows.map((row) => row.message_row_id),
+        ...queuedRows.map((row) => row.message_row_id),
+      ]);
+
+      let queued = 0;
+      for (const row of rows) {
+        if (!covered.has(row.id) && this.queueMessageEmbeddingFromRow(row, 0)) {
+          queued += 1;
+        }
+      }
+
+      const nextCursor = rows[rows.length - 1].id;
+      const hasMore = !!this.db.prepare(
+        "SELECT 1 FROM messages WHERE id < ? LIMIT 1",
+      ).get(nextCursor);
+      this.writeMetaValue(
+        MESSAGE_EMBEDDING_BACKFILL_CURSOR_META_KEY,
+        hasMore ? String(nextCursor) : "0",
+      );
+      this.db.exec("COMMIT");
+      return { queued, scanned: rows.length, complete: !hasMore };
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
     }
-    return queued;
   }
 
   pendingEmbeddingJobs(limit: number): EmbeddingJob[] {
@@ -168,7 +215,7 @@ export class MessageStore {
       FROM message_embedding_jobs AS j
       JOIN messages AS m ON m.id = j.message_row_id
       WHERE j.next_attempt_at <= ?
-      ORDER BY j.priority DESC, m.time DESC, m.id DESC
+      ORDER BY j.priority DESC, j.message_row_id DESC
       LIMIT ?
     `).all(nowUnix(), boundedLimit) as unknown as EmbeddingJobRow[];
     return rows.map((row) => ({
@@ -204,6 +251,13 @@ export class MessageStore {
           message_row_id, embedding, platform, source_type, target_id, user_id, time
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
       `);
+      const upsertState = this.db.prepare(`
+        INSERT INTO message_embedding_state (message_row_id, content_hash, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(message_row_id) DO UPDATE SET
+          content_hash = excluded.content_hash,
+          updated_at = excluded.updated_at
+      `);
       const removeJob = this.db.prepare(
         "DELETE FROM message_embedding_jobs WHERE message_row_id = ? AND content_hash = ?",
       );
@@ -225,6 +279,7 @@ export class MessageStore {
           write.userId,
           BigInt(write.time),
         );
+        upsertState.run(write.messageRowId, write.contentHash, nowUnix());
         removeJob.run(write.messageRowId, write.contentHash);
         completed += 1;
       }
@@ -270,7 +325,7 @@ export class MessageStore {
       return { indexed: 0, pending: 0, failed: 0 };
     }
     const indexed = this.db.prepare(
-      "SELECT COUNT(*) AS count FROM message_embeddings",
+      "SELECT COUNT(*) AS count FROM message_embedding_state",
     ).get() as { count: number };
     const jobs = this.db.prepare(`
       SELECT COUNT(*) AS pending, COUNT(*) FILTER (WHERE attempts > 0) AS failed
@@ -736,6 +791,7 @@ export class MessageStore {
     if (!this.embeddingConfig) {
       return;
     }
+    const hadStateTable = this.tableExists("message_embedding_state");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS message_embedding_jobs (
         message_row_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
@@ -747,8 +803,15 @@ export class MessageStore {
         updated_at INTEGER NOT NULL
       );
 
-      CREATE INDEX IF NOT EXISTS idx_message_embedding_jobs_ready
-        ON message_embedding_jobs(next_attempt_at, priority, message_row_id);
+      CREATE TABLE IF NOT EXISTS message_embedding_state (
+        message_row_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+        content_hash TEXT,
+        updated_at INTEGER NOT NULL
+      );
+
+      DROP INDEX IF EXISTS idx_message_embedding_jobs_ready;
+      CREATE INDEX IF NOT EXISTS idx_message_embedding_jobs_schedule
+        ON message_embedding_jobs(priority DESC, message_row_id DESC, next_attempt_at);
     `);
 
     const signature = [
@@ -757,9 +820,15 @@ export class MessageStore {
       this.embeddingConfig.dimensions,
     ].join(":");
     const hasTable = this.tableExists("message_embeddings");
-    if (hasTable && this.metaValue(MESSAGE_EMBEDDING_META_KEY) !== signature) {
+    const resetIndex = !hasTable || this.metaValue(MESSAGE_EMBEDDING_META_KEY) !== signature;
+    if (hasTable && resetIndex) {
       this.db.exec("DROP TABLE message_embeddings");
-      this.db.exec("DELETE FROM message_embedding_jobs");
+    }
+    if (resetIndex) {
+      this.db.exec(`
+        DELETE FROM message_embedding_jobs;
+        DELETE FROM message_embedding_state;
+      `);
     }
     if (!this.tableExists("message_embeddings")) {
       const dimensions = this.embeddingConfig.dimensions;
@@ -775,7 +844,38 @@ export class MessageStore {
         );
       `);
     }
+
+    const schedulerNeedsMigration =
+      !hadStateTable
+      || this.metaValue(MESSAGE_EMBEDDING_SCHEDULER_META_KEY) !== MESSAGE_EMBEDDING_SCHEDULER_VERSION;
+    if (!resetIndex && schedulerNeedsMigration) {
+      this.db.exec(`
+        INSERT OR IGNORE INTO message_embedding_state (message_row_id, content_hash, updated_at)
+        SELECT CAST(message_row_id AS INTEGER), NULL, unixepoch()
+        FROM message_embeddings;
+      `);
+    }
+
+    if (
+      resetIndex
+      || schedulerNeedsMigration
+      || this.metaValue(MESSAGE_EMBEDDING_BACKFILL_CURSOR_META_KEY) === null
+    ) {
+      this.resetEmbeddingBackfillCursor();
+    }
     this.writeMetaValue(MESSAGE_EMBEDDING_META_KEY, signature);
+    this.writeMetaValue(
+      MESSAGE_EMBEDDING_SCHEDULER_META_KEY,
+      MESSAGE_EMBEDDING_SCHEDULER_VERSION,
+    );
+  }
+
+  private resetEmbeddingBackfillCursor(): void {
+    const row = this.db.prepare("SELECT MAX(id) AS max_id FROM messages").get() as {
+      max_id: number | null;
+    };
+    const cursor = row.max_id === null ? 0 : row.max_id + 1;
+    this.writeMetaValue(MESSAGE_EMBEDDING_BACKFILL_CURSOR_META_KEY, String(cursor));
   }
 
   private rebuildLegacyPlatformTables(): void {
@@ -976,6 +1076,7 @@ export class MessageStore {
     if (!this.embeddingConfig) {
       return false;
     }
+    this.db.prepare("DELETE FROM message_embedding_state WHERE message_row_id = ?").run(rowId);
     this.db.prepare("DELETE FROM message_embeddings WHERE message_row_id = ?").run(rowId);
     if (!text) {
       this.db.prepare("DELETE FROM message_embedding_jobs WHERE message_row_id = ?").run(rowId);

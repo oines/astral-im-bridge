@@ -4,6 +4,7 @@ import { createServer, type Server } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import {
   EmbeddingClient,
   EmbeddingIndexer,
@@ -153,8 +154,104 @@ test("changing embedding model invalidates vectors and queues a fresh backfill",
 
   const changed = new MessageStore(storage, { ...initialConfig, model: "replacement-model" });
   assert.deepEqual(changed.embeddingIndexStats(), { indexed: 0, pending: 0, failed: 0 });
-  assert.equal(changed.enqueueEmbeddingBackfill(10), 1);
+  assert.deepEqual(changed.enqueueEmbeddingBackfill(10), {
+    queued: 1,
+    scanned: 1,
+    complete: true,
+  });
   assert.equal(changed.pendingEmbeddingJobs(1)[0]?.text, "需要重建");
+});
+
+test("embedding backfill cursor advances once and survives store restarts", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "astral-bridge-embedding-cursor-"));
+  const storage = {
+    dbPath: path.join(dir, "messages.sqlite"),
+    mediaDir: path.join(dir, "media"),
+    downloadMedia: false,
+  };
+  const withoutEmbedding = new MessageStore(storage);
+  for (let index = 1; index <= 5; index += 1) {
+    withoutEmbedding.saveMessage(makeMessage(index, `历史消息 ${index}`, "group-a"));
+  }
+
+  const config = embeddingConfig("http://127.0.0.1:1/v1");
+  const firstRun = new MessageStore(storage, config);
+  assert.deepEqual(firstRun.enqueueEmbeddingBackfill(2), {
+    queued: 2,
+    scanned: 2,
+    complete: false,
+  });
+  assert.deepEqual(
+    firstRun.pendingEmbeddingJobs(10).map((job) => job.messageRowId),
+    [5, 4],
+  );
+
+  const resumed = new MessageStore(storage, config);
+  assert.deepEqual(resumed.enqueueEmbeddingBackfill(2), {
+    queued: 2,
+    scanned: 2,
+    complete: false,
+  });
+  assert.deepEqual(resumed.enqueueEmbeddingBackfill(2), {
+    queued: 1,
+    scanned: 1,
+    complete: true,
+  });
+  assert.deepEqual(resumed.enqueueEmbeddingBackfill(2), {
+    queued: 0,
+    scanned: 0,
+    complete: true,
+  });
+
+  const raw = new DatabaseSync(storage.dbPath);
+  const plan = raw.prepare(`
+    EXPLAIN QUERY PLAN
+    SELECT j.message_row_id
+    FROM message_embedding_jobs AS j
+    JOIN messages AS m ON m.id = j.message_row_id
+    WHERE j.next_attempt_at <= 9999999999
+    ORDER BY j.priority DESC, j.message_row_id DESC
+    LIMIT 2
+  `).all() as unknown as Array<{ detail: string }>;
+  const planDetails = plan.map((row) => row.detail).join("\n");
+  assert.match(planDetails, /idx_message_embedding_jobs_schedule/);
+  assert.doesNotMatch(planDetails, /TEMP B-TREE/);
+  raw.close();
+});
+
+test("scheduler migration mirrors existing vectors without re-embedding them", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "astral-bridge-embedding-scheduler-"));
+  const storage = {
+    dbPath: path.join(dir, "messages.sqlite"),
+    mediaDir: path.join(dir, "media"),
+    downloadMedia: false,
+  };
+  const config = embeddingConfig("http://127.0.0.1:1/v1");
+  const initial = new MessageStore(storage, config);
+  initial.saveMessage(makeMessage(1, "已经有向量", "group-a"));
+  const job = initial.pendingEmbeddingJobs(1)[0];
+  assert.ok(job);
+  assert.equal(initial.completeEmbeddingJobs([{
+    ...job,
+    embedding: float32VectorBytes([1, 0, 0]),
+  }]), 1);
+
+  const raw = new DatabaseSync(storage.dbPath);
+  raw.exec(`
+    DROP TABLE message_embedding_state;
+    DELETE FROM store_meta
+    WHERE key IN ('message_embeddings_scheduler_version', 'message_embeddings_backfill_cursor');
+  `);
+  raw.close();
+
+  const migrated = new MessageStore(storage, config);
+  assert.deepEqual(migrated.embeddingIndexStats(), { indexed: 1, pending: 0, failed: 0 });
+  assert.deepEqual(migrated.enqueueEmbeddingBackfill(10), {
+    queued: 0,
+    scanned: 1,
+    complete: true,
+  });
+  assert.deepEqual(migrated.embeddingIndexStats(), { indexed: 1, pending: 0, failed: 0 });
 });
 
 function embeddingConfig(baseUrl: string): EmbeddingConfig {

@@ -19,8 +19,14 @@ export interface EmbeddingWrite extends EmbeddingJob {
   embedding: Uint8Array;
 }
 
+export interface EmbeddingBackfillResult {
+  queued: number;
+  scanned: number;
+  complete: boolean;
+}
+
 export interface EmbeddingJobStore {
-  enqueueEmbeddingBackfill(limit: number): number;
+  enqueueEmbeddingBackfill(limit: number): EmbeddingBackfillResult;
   pendingEmbeddingJobs(limit: number): EmbeddingJob[];
   completeEmbeddingJobs(writes: EmbeddingWrite[]): number;
   failEmbeddingJobs(jobs: EmbeddingJob[], error: string): void;
@@ -111,6 +117,7 @@ export class EmbeddingIndexer {
   private loopPromise: Promise<void> | null = null;
   private consecutiveFailures = 0;
   private indexedSinceStart = 0;
+  private backfillComplete = false;
 
   constructor(
     private readonly config: EmbeddingConfig,
@@ -140,8 +147,16 @@ export class EmbeddingIndexer {
     while (this.running) {
       let jobs: EmbeddingJob[] = [];
       try {
-        this.store.enqueueEmbeddingBackfill(Math.max(128, this.config.batchSize * 4));
         jobs = this.store.pendingEmbeddingJobs(this.config.batchSize);
+        if (jobs.length === 0 && !this.backfillComplete) {
+          const backfill = this.store.enqueueEmbeddingBackfill(this.config.batchSize);
+          this.backfillComplete = backfill.complete;
+          jobs = this.store.pendingEmbeddingJobs(this.config.batchSize);
+          if (jobs.length === 0 && !backfill.complete && backfill.scanned > 0) {
+            await sleep(0);
+            continue;
+          }
+        }
         if (jobs.length === 0) {
           await this.waitWhileRunning(1_000);
           continue;
