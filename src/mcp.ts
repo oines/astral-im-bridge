@@ -399,15 +399,7 @@ export function createBridgeMcpServer(
         response,
         segments: message,
       });
-      return structured(qqSendActionResponse(response, {
-        action: "send_group_message",
-        target_type: "group",
-        group_id: args.group_id,
-        message_id: oneBotResponseMessageId(response),
-        reply_to_message_id: args.reply_to_message_id ?? null,
-        text: args.message,
-        parts_count: message.length,
-      }));
+      return structured(qqMessageSendResponse(response));
     },
   );
 
@@ -439,15 +431,7 @@ export function createBridgeMcpServer(
         response,
         segments: message,
       });
-      return structured(qqSendActionResponse(response, {
-        action: "send_private_message",
-        target_type: "private",
-        user_id: args.user_id,
-        message_id: oneBotResponseMessageId(response),
-        reply_to_message_id: args.reply_to_message_id ?? null,
-        text: args.message,
-        parts_count: message.length,
-      }));
+      return structured(qqMessageSendResponse(response));
     },
   );
 
@@ -924,19 +908,7 @@ function registerTelegramTools(
         replyToMessageId: args.reply_to_message_id,
         replyQuote,
       });
-      return structured(compactActionResponse({
-        ok: true,
-        platform: "telegram",
-        action: "send_message",
-        chat_id: args.chat_id,
-        chat_type: response.chat.type,
-        chat_title: telegramChatTitle(response),
-        message_id: String(response.message_id),
-        message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
-        reply_to_message_id: args.reply_to_message_id ?? null,
-        reply_quote: replyQuote,
-        text: telegramPlainText(outbound.segments),
-      }));
+      return structured(telegramMessageSendResponse(response));
     },
   );
 
@@ -977,20 +949,7 @@ function registerTelegramTools(
         replyToMessageId: args.reply_to_message_id,
         replyQuote,
       });
-      return structured(compactActionResponse({
-        ok: true,
-        platform: "telegram",
-        action: "send_rich_message",
-        chat_id: args.chat_id,
-        chat_type: response.chat.type,
-        chat_title: telegramChatTitle(response),
-        message_id: String(response.message_id),
-        message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
-        reply_to_message_id: args.reply_to_message_id ?? null,
-        reply_quote: replyQuote,
-        format: outbound.format,
-        summary: outbound.summary,
-      }));
+      return structured(telegramMessageSendResponse(response));
     },
   );
 
@@ -1028,20 +987,7 @@ function registerTelegramTools(
         replyToMessageId: args.reply_to_message_id,
         replyQuote,
       });
-      return structured(compactActionResponse({
-        ok: true,
-        platform: "telegram",
-        action: "send_file",
-        chat_id: args.chat_id,
-        chat_type: response.chat.type,
-        chat_title: telegramChatTitle(response),
-        message_id: String(response.message_id),
-        message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
-        reply_to_message_id: args.reply_to_message_id ?? null,
-        reply_quote: replyQuote,
-        file: args.file,
-        caption: args.caption || null,
-      }));
+      return structured(telegramMessageSendResponse(response));
     },
   );
 
@@ -1081,19 +1027,7 @@ function registerTelegramTools(
             replyToMessageId: args.reply_to_message_id,
             replyQuote,
           });
-          return structured(compactActionResponse({
-            ok: true,
-            platform: "telegram",
-            action: "send_voice",
-            chat_id: args.chat_id,
-            chat_type: response.chat.type,
-            chat_title: telegramChatTitle(response),
-            message_id: String(response.message_id),
-            message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
-            reply_to_message_id: args.reply_to_message_id ?? null,
-            reply_quote: replyQuote,
-            text: voice.text,
-          }));
+          return structured(telegramMessageSendResponse(response));
         } finally {
           deleteTempVoiceFile(voice.audioPath);
         }
@@ -1204,8 +1138,48 @@ async function startHttpMcpServer(
     writeHtml(res, 200, dashboardHtml());
   });
 
+  app.get("/api/dashboard/events", (req: IncomingMessage, res: ServerResponse) => {
+    res.statusCode = 200;
+    res.setHeader("content-type", "text/event-stream; charset=utf-8");
+    res.setHeader("cache-control", "no-cache, no-transform");
+    res.setHeader("connection", "keep-alive");
+    res.setHeader("x-accel-buffering", "no");
+    res.flushHeaders();
+    res.write(`data: ${JSON.stringify({
+      method: "dashboard/connected",
+      params: {},
+      emittedAt: new Date().toISOString(),
+    })}\n\n`);
+
+    const unsubscribe = astral.subscribeDashboardEvents((event) => {
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      }
+    });
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write(": heartbeat\n\n");
+      }
+    }, 15_000);
+
+    let closed = false;
+    const close = () => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      clearInterval(heartbeat);
+      unsubscribe();
+      if (!res.writableEnded) {
+        res.end();
+      }
+    };
+    req.once("close", close);
+    res.once("close", close);
+  });
+
   app.get("/api/dashboard/state", (_req: IncomingMessage, res: ServerResponse) => {
-    writeJson(res, 200, dashboardState(config, onebot, telegram, astral, store, externalEventBatcher));
+    writeJson(res, 200, dashboardState(config, onebot, telegram, astral, externalEventBatcher));
   });
 
   app.post("/api/astral/thread/rotate", async (req: IncomingMessage, res: ServerResponse) => {
@@ -1338,6 +1312,7 @@ async function startHttpMcpServer(
     path: config.mcp.path,
     uiPath: "/ui",
     dashboardStatePath: "/api/dashboard/state",
+    dashboardEventsPath: "/api/dashboard/events",
     eventPath: config.externalEvents.enabled ? config.externalEvents.path : null,
   });
 }
@@ -2057,6 +2032,20 @@ function qqSendActionResponse(
   });
 }
 
+export function qqMessageSendResponse(response: unknown): Record<string, unknown> {
+  return compactActionResponse({
+    ok: oneBotActionOk(response),
+    message_id: oneBotResponseMessageId(response),
+  });
+}
+
+export function telegramMessageSendResponse(response: { message_id: number }): Record<string, unknown> {
+  return {
+    ok: true,
+    message_id: String(response.message_id),
+  };
+}
+
 function firstResponseId(value: Record<string, unknown>, keys: string[]): string | null {
   for (const key of keys) {
     const id = value[key];
@@ -2190,22 +2179,6 @@ function summarizeSegment(segment: unknown): unknown {
       text: text.length > 200 ? `${text.slice(0, 200)}...` : text,
     },
   };
-}
-
-function telegramPlainText(segments: MessageSegment[]): string {
-  return segments.map((segment) => {
-    const data = segment.data ?? {};
-    switch (segment.type) {
-      case "text":
-        return String(data.text ?? "");
-      case "mention":
-        return String(data.username ? `@${data.username}` : data.text ?? data.user_id ?? "");
-      case "file":
-        return `[file:${String(data.name ?? data.file ?? "")}]`;
-      default:
-        return `[${segment.type}]`;
-    }
-  }).join("");
 }
 
 function historyMessagesResponse(

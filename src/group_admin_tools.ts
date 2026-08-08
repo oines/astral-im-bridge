@@ -205,6 +205,10 @@ export function registerGroupAdminTools(
       group_id: z.string().optional(),
       user_id: z.string().optional(),
       no_cache: z.boolean().default(false),
+      offset: z.number().int().min(0).default(0)
+        .describe("Member-list offset; ignored by other actions."),
+      limit: z.number().int().min(1).optional()
+        .describe("Optional member-list page size; omit to return all remaining members."),
       honor_type: z.enum(["talkative", "performer", "legend", "strong_newbie", "emotion", "all"])
         .default("all"),
     },
@@ -213,7 +217,9 @@ export function registerGroupAdminTools(
         assertAllowedGroup(config, args.group_id);
       }
       const response = await runInfoAction(onebot, args);
-      return structured(groupAdminResponse(args.action, args, response));
+      return structured(args.action === "get_member_list"
+        ? groupMemberListResponse(args, response)
+        : groupAdminResponse(args.action, args, response));
     },
   );
 }
@@ -290,7 +296,7 @@ function groupAdminHelp(topic: string): Record<string, unknown> {
         get_group_info: "Get group info. Requires group_id.",
         get_group_info_ex: "Get extended group info. Requires group_id.",
         get_member_info: "Get member info. Requires group_id, user_id.",
-        get_member_list: "List group members. Requires group_id.",
+        get_member_list: "List all group members with compact fields. Requires group_id. Optional offset and limit provide paging fallback.",
         get_honor_info: "Get group honor info. Requires group_id. Optional honor_type.",
       },
     },
@@ -593,6 +599,8 @@ async function runInfoAction(
     group_id?: string;
     user_id?: string;
     no_cache: boolean;
+    offset: number;
+    limit?: number;
     honor_type: string;
   },
 ): Promise<unknown> {
@@ -718,6 +726,52 @@ function groupAdminResponse(
     retcode: oneBotActionRetcode(response),
     data,
   });
+}
+
+export function groupMemberListResponse(
+  args: { group_id?: string; offset: number; limit?: number },
+  response: unknown,
+): Record<string, unknown> {
+  const data = oneBotResponseData(response);
+  if (!oneBotActionOk(response) || !Array.isArray(data)) {
+    return groupAdminResponse("get_member_list", args, response);
+  }
+
+  const total = data.length;
+  const offset = Math.min(args.offset, total);
+  const end = args.limit == null ? total : Math.min(offset + args.limit, total);
+  const members = data.slice(offset, end).map(compactGroupMember);
+  return compactObject({
+    ok: true,
+    group_id: args.group_id ?? null,
+    total,
+    returned_count: members.length,
+    next_offset: end < total ? end : null,
+    members,
+  });
+}
+
+function compactGroupMember(value: unknown): Record<string, unknown> {
+  const member = isPlainObject(value) ? value : {};
+  const userId = member.user_id == null ? null : String(member.user_id);
+  const nickname = optionalString(member.nickname);
+  const card = optionalString(member.card);
+  return compactObject({
+    user_id: userId,
+    display_name: card ?? nickname ?? userId,
+    nickname,
+    card,
+    role: optionalString(member.role),
+    title: optionalString(member.title ?? member.special_title),
+  });
+}
+
+function optionalString(value: unknown): string | null {
+  if (value == null) {
+    return null;
+  }
+  const text = String(value).trim();
+  return text || null;
 }
 
 function oneBotActionOk(response: unknown): boolean {

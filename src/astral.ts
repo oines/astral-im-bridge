@@ -62,6 +62,12 @@ export interface RotateThreadResult {
   reason: string;
 }
 
+export interface AstralDashboardEvent {
+  method: string;
+  params: Record<string, unknown>;
+  emittedAt: string;
+}
+
 export class AstralAppServerClient extends EventEmitter {
   private socket: WebSocket | null = null;
   private nextId = 1;
@@ -88,15 +94,48 @@ export class AstralAppServerClient extends EventEmitter {
   }
 
   async submitInboundMessage(message: StoredMessage): Promise<void> {
-    const task = this.submissionQueue.then(() => this.submitInboundMessageNow(message));
+    const dashboardInput = dashboardInputFromMessage(message);
+    this.emitDashboardEvent("bridge/input/queued", dashboardInput);
+    const task = this.submissionQueue.then(async () => {
+      this.emitDashboardEvent("bridge/input/processing", dashboardInput);
+      try {
+        await this.submitInboundMessageNow(message);
+        this.emitDashboardEvent("bridge/input/submitted", dashboardInput);
+      } catch (err) {
+        this.emitDashboardEvent("bridge/input/failed", {
+          ...dashboardInput,
+          error: errorMessage(err),
+        });
+        throw err;
+      }
+    });
     this.submissionQueue = task.catch(() => undefined);
     return task;
   }
 
   async submitExternalEvent(event: ExternalEvent): Promise<void> {
-    const task = this.submissionQueue.then(() => this.submitExternalEventNow(event));
+    const dashboardInput = dashboardInputFromExternalEvent(event);
+    this.emitDashboardEvent("bridge/input/queued", dashboardInput);
+    const task = this.submissionQueue.then(async () => {
+      this.emitDashboardEvent("bridge/input/processing", dashboardInput);
+      try {
+        await this.submitExternalEventNow(event);
+        this.emitDashboardEvent("bridge/input/submitted", dashboardInput);
+      } catch (err) {
+        this.emitDashboardEvent("bridge/input/failed", {
+          ...dashboardInput,
+          error: errorMessage(err),
+        });
+        throw err;
+      }
+    });
     this.submissionQueue = task.catch(() => undefined);
     return task;
+  }
+
+  subscribeDashboardEvents(listener: (event: AstralDashboardEvent) => void): () => void {
+    this.on("dashboardEvent", listener);
+    return () => this.off("dashboardEvent", listener);
   }
 
   async interruptActiveTurn(): Promise<InterruptActiveTurnResult> {
@@ -655,6 +694,8 @@ export class AstralAppServerClient extends EventEmitter {
       return;
     }
 
+    this.emitDashboardEvent(message.method, params);
+
     switch (message.method) {
       case "thread/tokenUsage/updated": {
         const tokenUsage = normalizeThreadTokenUsage(params.tokenUsage);
@@ -711,6 +752,15 @@ export class AstralAppServerClient extends EventEmitter {
     }
   }
 
+  private emitDashboardEvent(method: string, params: Record<string, unknown>): void {
+    const event = {
+      method,
+      params,
+      emittedAt: new Date().toISOString(),
+    } satisfies AstralDashboardEvent;
+    this.emit("dashboardEvent", event);
+  }
+
   private respondToServerRequest(request: { id: RequestId; method: string }): void {
     const result = safeServerRequestResponse(request.method);
     if (result) {
@@ -727,6 +777,44 @@ export class AstralAppServerClient extends EventEmitter {
       }),
     );
   }
+}
+
+function dashboardInputFromMessage(message: StoredMessage): Record<string, unknown> {
+  return {
+    id: `${message.platform}:${message.sourceType}:${message.targetId}:${message.platformMessageId}`,
+    kind: "message",
+    platform: message.platform,
+    sourceType: message.sourceType,
+    targetId: message.targetId,
+    groupName: message.groupName,
+    userId: message.userId,
+    sender: message.groupCard || message.nickname || message.userId,
+    text: message.rawMessage || message.text,
+    trigger: message.trigger,
+    occurredAt: new Date(message.time * 1000).toISOString(),
+    attachmentCount: message.attachments.length,
+  };
+}
+
+function dashboardInputFromExternalEvent(event: ExternalEvent): Record<string, unknown> {
+  return {
+    id: `external:${event.source}:${event.id}`,
+    kind: "external_event",
+    platform: "external",
+    sourceType: event.eventType,
+    targetId: event.source,
+    groupName: event.title,
+    userId: null,
+    sender: event.source,
+    text: event.body,
+    trigger: "external_event",
+    occurredAt: event.occurredAt,
+    attachmentCount: 0,
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isMissingRolloutError(error: unknown): boolean {
