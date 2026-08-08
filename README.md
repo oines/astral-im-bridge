@@ -563,6 +563,14 @@ data/                Runtime SQLite state, ignored by git
 media/               Runtime media cache, ignored by git
 ```
 
+## Acknowledgements
+
+The design of `query_messages` was inspired by
+[Obelisk](https://github.com/tommy0103/obelisk) and its agent-first approach to retrieval:
+give the agent a programmable query surface over a local SQLite index, then
+let the agent decide how to search, inspect context, and follow the evidence. Thank you for
+showing how much more capable retrieval becomes when the agent owns the query plan.
+
 ## License
 
 Licensed under the Apache License, Version 2.0. See `LICENSE`.
