@@ -396,6 +396,17 @@ export class MessageStore {
     return row ? this.rowToMessage(row) : null;
   }
 
+  findMessagesByPlatformMessageId(messageId: string, platform: Platform): StoredMessage[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE platform = ? AND platform_message_id = ?
+         ORDER BY time DESC, id DESC`,
+      )
+      .all(platform, messageId) as unknown as StoredMessageRow[];
+    return rows.map((row) => this.rowToMessage(row));
+  }
+
   searchMessages(
     platform: Platform,
     sourceType: SourceType,

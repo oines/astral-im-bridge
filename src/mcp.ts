@@ -12,9 +12,15 @@ import { ExternalEventBatcher } from "./event_batcher.js";
 import { registerGroupAdminTools } from "./group_admin_tools.js";
 import { error, log, warn } from "./logger.js";
 import { downloadAttachmentFromUrl, ensureAttachmentDownloaded, writeMediaFile } from "./media.js";
-import { buildOutboundStoredMessage, replySegmentMessageId, sanitizeCqMessage } from "./message.js";
+import {
+  buildOutboundStoredMessage,
+  isQqMergedForward,
+  replySegmentMessageId,
+  sanitizeCqMessage,
+} from "./message.js";
 import { MESSAGE_QUERY_TIMEOUT_MS, runMessageQuery } from "./message_query.js";
 import type { OneBotClient } from "./onebot.js";
+import { expandQqForwardMessages, findQqForwardNode, type QqForwardExpansion } from "./qq_forward.js";
 import { QQ_REACTION_EMOJI_IDS, TELEGRAM_REACTION_EMOJIS } from "./reactions.js";
 import type { MessageStore } from "./store.js";
 import {
@@ -220,6 +226,24 @@ export function createBridgeMcpServer(
   );
 
   server.tool(
+    "qq_get_forward_messages",
+    "Expand one stored QQ merged-forward message on demand. Returns all nested nodes in depth-first order without downloading or storing their media.",
+    {
+      message_id: z.string().trim().min(1),
+      target_type: z.enum(["group", "private"]).optional(),
+      target_id: z.string().trim().min(1).optional(),
+    },
+    async (args) => {
+      const outer = resolveStoredQqForwardMessage(config, store, args);
+      const expansion = await expandQqForwardMessages(
+        outer.platformMessageId,
+        (messageId) => onebot.getForwardMessage(messageId),
+      );
+      return structured(qqForwardMessagesResponse(outer, expansion));
+    },
+  );
+
+  server.tool(
     "qq_get_unread_messages",
     "Get the current unread batch for a group or private conversation. This returns the messages counted by the latest conversation_unread_count field.",
     {
@@ -285,28 +309,59 @@ export function createBridgeMcpServer(
 
   server.tool(
     "qq_download_media",
-    "Download a stored QQ image/file attachment to the local media cache and return its path.",
+    "Download a stored QQ attachment, including media inside a merged-forward node, to the local media cache and return its path.",
     {
       attachment_id: z.number().int().optional(),
       message_id: z.string().optional(),
+      target_type: z.enum(["group", "private"]).optional(),
+      target_id: z.string().trim().min(1).optional(),
+      forward_node_path: z.string().trim().min(1).optional()
+        .describe("Node path returned by qq_get_forward_messages, for example 4/1."),
       attachment_index: z.number().int().min(0).default(0),
     },
     async (args) => {
-      const attachment = args.attachment_id != null
-        ? store.getAttachment(args.attachment_id)
-        : args.message_id
-          ? store.getAttachmentsForMessage(args.message_id, "qq")[args.attachment_index]
-          : null;
+      let attachment: StoredAttachment | null | undefined;
+      if (args.forward_node_path) {
+        if (args.attachment_id != null) {
+          throw new Error("attachment_id cannot be combined with forward_node_path");
+        }
+        if (!args.message_id) {
+          throw new Error("message_id is required with forward_node_path");
+        }
+        const outer = resolveStoredQqForwardMessage(config, store, {
+          message_id: args.message_id,
+          target_type: args.target_type,
+          target_id: args.target_id,
+        });
+        const expansion = await expandQqForwardMessages(
+          outer.platformMessageId,
+          (messageId) => onebot.getForwardMessage(messageId),
+        );
+        const node = findQqForwardNode(expansion, args.forward_node_path);
+        if (!node) {
+          throw new Error(`forward node not found: ${args.forward_node_path}`);
+        }
+        attachment = node.attachments[args.attachment_index];
+      } else {
+        attachment = args.attachment_id != null
+          ? store.getAttachment(args.attachment_id)
+          : args.message_id
+            ? store.getAttachmentsForMessage(args.message_id, "qq")[args.attachment_index]
+            : null;
+      }
       if (!attachment) {
         throw new Error("attachment not found");
       }
       const filePath = await downloadQqAttachment(store, onebot, attachment);
       return structured(compactActionResponse({
         ok: true,
-        platform: "qq",
-        action: "download_media",
         path: filePath,
-        attachment: compactAttachment(attachment),
+        kind: attachment.kind,
+        name: attachment.name,
+        mime_type: attachment.mimeType,
+        size: attachment.size,
+        forward_node_path: args.forward_node_path,
+        attachment_index: args.forward_node_path ? args.attachment_index : undefined,
       }));
     },
   );
@@ -590,6 +645,80 @@ export function createBridgeMcpServer(
   return server;
 }
 
+function resolveStoredQqForwardMessage(
+  config: BridgeConfig,
+  store: MessageStore,
+  args: {
+    message_id: string;
+    target_type?: "group" | "private";
+    target_id?: string;
+  },
+): StoredMessage {
+  if (Boolean(args.target_type) !== Boolean(args.target_id)) {
+    throw new Error("target_type and target_id must be provided together");
+  }
+
+  const candidates = args.target_type && args.target_id
+    ? [store.getMessage(args.message_id, "qq", args.target_type, args.target_id)].filter(
+        (message): message is StoredMessage => message != null,
+      )
+    : store.findMessagesByPlatformMessageId(args.message_id, "qq");
+  if (candidates.length === 0) {
+    throw new Error(`stored QQ message not found: ${args.message_id}`);
+  }
+
+  const allowed = candidates.filter((message) => isAllowedQqConversation(config, message));
+  if (allowed.length === 0) {
+    throw new Error("QQ message belongs to a conversation outside the configured whitelist");
+  }
+  if (allowed.length > 1) {
+    throw new Error("message_id matches multiple QQ conversations; provide target_type and target_id");
+  }
+  const outer = allowed[0];
+  if (!isQqMergedForward(outer)) {
+    throw new Error(`QQ message ${args.message_id} is not a merged-forward message`);
+  }
+  return outer;
+}
+
+function isAllowedQqConversation(config: BridgeConfig, message: StoredMessage): boolean {
+  return message.sourceType === "group"
+    ? config.qq.allowedGroupIds.includes(message.targetId)
+    : config.qq.allowedPrivateUserIds.includes(message.targetId);
+}
+
+function qqForwardMessagesResponse(
+  outer: StoredMessage,
+  expansion: QqForwardExpansion,
+): Record<string, unknown> {
+  return {
+    ok: true,
+    message_id: outer.platformMessageId,
+    target_type: outer.sourceType,
+    target_id: outer.targetId,
+    total_nodes: expansion.nodes.length,
+    warnings: expansion.warnings,
+    nodes: expansion.nodes.map((node) => ({
+      node_path: node.nodePath,
+      depth: node.depth,
+      sender_user_id: node.senderUserId,
+      sender_display_name: node.senderDisplayName,
+      time_unix: node.timeUnix,
+      text: node.text,
+      attachments: node.attachments.map((attachment, attachmentIndex) => compactActionResponse({
+        attachment_index: attachmentIndex,
+        kind: attachment.kind,
+        name: attachment.name,
+        mime_type: attachment.mimeType,
+        size: attachment.size,
+        file_id: attachment.fileId,
+        has_remote_url: Boolean(attachment.url),
+      })),
+      unsupported_segment_types: node.unsupportedSegmentTypes,
+    })),
+  };
+}
+
 async function downloadQqAttachment(
   store: MessageStore,
   onebot: OneBotClient,
@@ -617,19 +746,36 @@ async function downloadQqAttachment(
     }
   }
 
-  if (attachment.kind === "image") {
-    const file = attachment.fileId ?? attachment.name;
-    if (file) {
+  const file = attachment.fileId ?? attachment.name;
+  if (file) {
+    const fallback = qqMediaFallbackAction(attachment.kind, file);
+    if (fallback) {
       try {
-        const response = await onebot.callAction<{ data?: unknown }>("get_image", { file });
-        const data = asRecord((response as { data?: unknown }).data);
-        const imageUrl = stringField(data, "url");
-        if (imageUrl) {
-          return await downloadAttachmentFromUrl(store, attachment, imageUrl);
+        const response = await onebot.callAction<{ data?: unknown }>(fallback.action, fallback.params);
+        const data = asRecord(response.data);
+        const resolvedUrl = stringField(data, "url") ?? stringField(data, "file_url");
+        if (resolvedUrl) {
+          const cookies = await qqCookieCandidates(onebot, resolvedUrl);
+          for (const cookie of cookies) {
+            try {
+              return await downloadAttachmentFromUrl(store, attachment, resolvedUrl, {
+                cookie,
+                referer: "https://im.qq.com/",
+                "user-agent": "Mozilla/5.0",
+              });
+            } catch (err) {
+              errors.push(String(err));
+            }
+          }
+          try {
+            return await downloadAttachmentFromUrl(store, attachment, resolvedUrl);
+          } catch (err) {
+            errors.push(String(err));
+          }
         }
-        const imageFile = stringField(data, "file");
-        if (imageFile) {
-          return await downloadAttachmentFromOneBotFile(store, attachment, imageFile);
+        const resolvedFile = stringField(data, "file") ?? stringField(data, "path");
+        if (resolvedFile) {
+          return await downloadAttachmentFromOneBotFile(store, attachment, resolvedFile);
         }
       } catch (err) {
         errors.push(String(err));
@@ -638,6 +784,25 @@ async function downloadQqAttachment(
   }
 
   throw new Error(`failed to download QQ media: ${errors.join("; ")}`);
+}
+
+function qqMediaFallbackAction(
+  kind: string,
+  file: string,
+): { action: string; params: Record<string, unknown> } | null {
+  switch (kind) {
+    case "image":
+      return { action: "get_image", params: { file } };
+    case "record":
+    case "voice":
+      return { action: "get_record", params: { file, out_format: "ogg" } };
+    case "file":
+      return { action: "get_file", params: { file, type: "file" } };
+    case "video":
+      return { action: "get_file", params: { file, type: "video" } };
+    default:
+      return null;
+  }
 }
 
 async function downloadQqUserAvatar(
@@ -2209,7 +2374,7 @@ function compactStoredMessageOrNull(message: StoredMessage | null): Record<strin
   return message ? compactStoredMessage(message) : null;
 }
 
-function compactStoredMessage(message: StoredMessage): Record<string, unknown> {
+export function compactStoredMessage(message: StoredMessage): Record<string, unknown> {
   const replyQuote = message.platform === "telegram" ? extractTelegramReplyQuote(message.rawEvent) : null;
   return {
     id: message.id,
@@ -2227,6 +2392,7 @@ function compactStoredMessage(message: StoredMessage): Record<string, unknown> {
     time_unix: message.time,
     text: message.text,
     raw_message: truncateText(sanitizeCqMessage(message.rawMessage), 500),
+    ...(isQqMergedForward(message) ? { forward: { expandable: true } } : {}),
     trigger: message.trigger,
     reply_to_message_id: message.replyToMessageId,
     reply_quote: replyQuote,

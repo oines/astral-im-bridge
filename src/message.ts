@@ -103,6 +103,8 @@ export function historyTextFromSegments(segments: MessageSegment[]): string {
           return `[CQ:image,file=${safeMediaLabel(data.file ?? data.id)}]`;
         case "file":
           return `[CQ:file,file=${safeMediaLabel(data.file ?? data.name)}]`;
+        case "forward":
+          return `[CQ:forward,id=${String(data.id ?? data.message_id ?? "")}]`;
         default:
           return `[${segment.type}]`;
       }
@@ -214,7 +216,7 @@ function normalizeReplyId(value: unknown): string | null {
 
 export function attachmentsFromSegments(segments: MessageSegment[]): StoredAttachment[] {
   return segments.flatMap((segment) => {
-    if (!["image", "file", "record", "video"].includes(segment.type)) {
+    if (!["image", "file", "onlinefile", "record", "voice", "video"].includes(segment.type)) {
       return [];
     }
     const data = segment.data ?? {};
@@ -223,7 +225,11 @@ export function attachmentsFromSegments(segments: MessageSegment[]): StoredAttac
     const name = firstString(data, ["name", "file_name", "filename"]);
     return [
       {
-        kind: segment.type,
+        kind: segment.type === "voice"
+          ? "record"
+          : segment.type === "onlinefile"
+            ? "file"
+            : segment.type,
         fileId: firstString(data, ["file_id", "id"]) ?? (path ? null : file),
         name,
         url: firstString(data, ["url"]),
@@ -267,6 +273,40 @@ export function buildStoredMessage(
     rawEvent: event,
     attachments: attachmentsFromSegments(segments),
   };
+}
+
+export function buildRecoveredQqReplyMessage(
+  event: OneBotMessageEvent,
+  groupInfo: GroupInfo | null,
+  sourceType: SourceType,
+  targetId: string,
+  botUserId: string,
+): StoredMessage | null {
+  if (event.message_type !== sourceType) {
+    return null;
+  }
+  if (sourceType === "group" && event.group_id != null && String(event.group_id) !== targetId) {
+    return null;
+  }
+  const senderId = event.sender?.user_id ?? event.user_id;
+  if (senderId == null || event.message_id == null) {
+    return null;
+  }
+  const normalized: OneBotMessageEvent = {
+    ...event,
+    post_type: String(senderId) === botUserId ? "message_sent" : "message",
+    message_type: sourceType,
+    user_id: senderId,
+    group_id: sourceType === "group" ? targetId : undefined,
+    target_id: sourceType === "private" ? targetId : event.target_id,
+  };
+  const segments = normalizeSegments(normalized.message);
+  return buildStoredMessage(
+    normalized,
+    groupInfo,
+    String(senderId) === botUserId ? "bot_message" : "none",
+    replyMessageIdFromEvent(normalized, segments),
+  );
 }
 
 export function buildPokeStoredMessage(
@@ -386,8 +426,32 @@ export function buildAstralPrompt(message: StoredMessage): string {
   return buildQqAstralPrompt(message);
 }
 
+export function isQqMergedForward(message: StoredMessage): boolean {
+  if (message.platform !== "qq") {
+    return false;
+  }
+  if (qqMessageSegments(message).some((segment) => segment.type === "forward")) {
+    return true;
+  }
+  return /\[CQ:forward(?:,|\])/i.test(message.rawMessage);
+}
+
+function qqMessageSegments(message: StoredMessage): MessageSegment[] {
+  if (!isRecord(message.rawEvent)) {
+    return [];
+  }
+  const rawSegments = message.rawEvent.message;
+  if (!Array.isArray(rawSegments)) {
+    return [];
+  }
+  return rawSegments.filter((segment): segment is MessageSegment => {
+    return isRecord(segment) && typeof segment.type === "string";
+  });
+}
+
 function buildQqAstralPrompt(message: StoredMessage): string {
   const isPoke = isQqPokeMessage(message);
+  const isMergedForward = isQqMergedForward(message);
   const lines = [
     "[QQ inbound message]",
     `platform: onebot_v11 / napcat`,
@@ -404,6 +468,9 @@ function buildQqAstralPrompt(message: StoredMessage): string {
     lines.push(`sender_role: ${message.role ?? ""}`);
   }
   lines.push(`message_id: ${message.platformMessageId}`);
+  if (isMergedForward) {
+    lines.push("message_type: merged_forward");
+  }
   lines.push(`time_unix: ${message.time}`);
   lines.push(`trigger: ${message.trigger}`);
   if (isPoke) {

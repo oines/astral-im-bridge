@@ -132,6 +132,17 @@ export class OneBotClient extends EventEmitter<OneBotEvents> {
     return (response.data ?? null) as OneBotMessageEvent | null;
   }
 
+  async getForwardMessage(messageId: string): Promise<unknown[]> {
+    const response = await this.callAction<unknown>("get_forward_msg", {
+      message_id: messageId,
+    });
+    const messages = forwardMessagesFromResponse(response);
+    if (!messages) {
+      throw new Error("NapCat get_forward_msg returned no message list");
+    }
+    return messages;
+  }
+
   status(): Record<string, unknown> {
     return {
       connected: this.socket?.readyState === WebSocket.OPEN,
@@ -257,4 +268,27 @@ function isPokeNoticeEvent(value: unknown): value is OneBotPokeNoticeEvent {
 
 function asNullableNumber(value: unknown): number | null {
   return typeof value === "number" ? value : null;
+}
+
+export function forwardMessagesFromResponse(value: unknown): unknown[] | null {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.data !== undefined) {
+    const nested = forwardMessagesFromResponse(record.data);
+    if (nested) {
+      return nested;
+    }
+  }
+  if (Array.isArray(record.messages)) {
+    return record.messages;
+  }
+  if (Array.isArray(record.message)) {
+    return record.message;
+  }
+  return null;
 }

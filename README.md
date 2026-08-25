@@ -330,8 +330,9 @@ joins, grouping, time buckets, and other shapes not covered naturally by the hig
 | `qq_get_unread_messages` | Return the unread batch counted by the latest inbound Astral prompt. |
 | `qq_get_recent_messages` | Return recent stored messages for one group or private conversation. |
 | `qq_get_message` | Return one stored message by OneBot `message_id`. |
+| `qq_get_forward_messages` | Expand every node in one stored, allowlisted QQ merged-forward message without persisting or downloading its contents. |
 | `qq_get_conversation_state` | Return bridge state and counts for one conversation. |
-| `qq_download_media` | Download a stored image/file attachment into the local media cache. |
+| `qq_download_media` | Download a stored attachment, or one attachment selected by a merged-forward `forward_node_path`, into the local media cache. |
 | `qq_set_reaction` | React to a stored QQ group message by OneBot `message_id` and QQ `emoji_id`. QQ reactions only work in group chats; the tool description lists common `emoji_id` values. |
 | `qq_group_admin_help` | Explain grouped QQ administration tools and actions. |
 | `qq_group_member_admin` | Kick, mute/unmute, set admin, set card, set special title, or list muted members. |
@@ -384,6 +385,12 @@ Reply to a specific QQ message by passing `reply_to_message_id` with the OneBot
 
 Images in outbound messages use OneBot `image` segments. Non-image files use
 NapCat-compatible `upload_group_file` and `upload_private_file` actions.
+
+QQ merged-forward messages remain opaque in inbound prompts and history until the agent calls
+`qq_get_forward_messages`. The tool returns every nested node in depth-first order. To fetch one
+internal image, file, voice, or video afterward, pass the outer `message_id`, the returned
+`forward_node_path`, and its zero-based `attachment_index` to `qq_download_media`. Forwarded
+children are never added to ordinary history, FTS, or embedding indexes.
 
 Telegram text messages use ordered `parts` for mentions:
 

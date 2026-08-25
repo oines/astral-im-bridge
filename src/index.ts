@@ -5,6 +5,7 @@ import { EmbeddingIndexer } from "./embedding.js";
 import { log, warn, error } from "./logger.js";
 import {
   buildPokeStoredMessage,
+  buildRecoveredQqReplyMessage,
   buildStoredMessage,
   isAtBot,
   normalizeSegments,
@@ -109,7 +110,18 @@ async function handleOneBotMessage(
     return;
   }
 
-  let groupInfo = await fetchGroupInfoForEvent(onebot, sourceType, targetId);
+  const groupInfo = await fetchGroupInfoForEvent(onebot, sourceType, targetId);
+  if (replyTo) {
+    await recoverMissingQqReplyTarget(
+      store,
+      onebot,
+      replyTo,
+      sourceType,
+      targetId,
+      groupInfo,
+      config.qq.botUserId,
+    );
+  }
   let trigger: TriggerKind = "none";
 
   if (matchesTriggerKeyword(textFromSegments(segments), config.qq.triggerKeywords)) {
@@ -117,7 +129,14 @@ async function handleOneBotMessage(
   } else if (sourceType === "group") {
     if (isAtBot(segments, config.qq.botUserId)) {
       trigger = "group_mention";
-    } else if (replyTo && await isReplyToBot(onebot, replyTo, config.qq.botUserId)) {
+    } else if (replyTo && await isReplyToBot(
+      store,
+      onebot,
+      replyTo,
+      config.qq.botUserId,
+      sourceType,
+      targetId,
+    )) {
       trigger = "group_reply";
     } else if (isAlwaysTriggerGroup(config, targetId)) {
       trigger = "group_always";
@@ -491,16 +510,74 @@ async function handleTelegramStopTurnCommand(
 }
 
 async function isReplyToBot(
+  store: MessageStore,
   onebot: OneBotClient,
   messageId: string,
   botUserId: string,
+  sourceType: SourceType,
+  targetId: string,
 ): Promise<boolean> {
+  const stored = store.getMessage(messageId, "qq", sourceType, targetId);
+  if (stored) {
+    return stored.userId === botUserId;
+  }
   const replied = await onebot.getMessage(messageId).catch((err) => {
     warn("failed to fetch replied message", { messageId, error: String(err) });
     return null;
   });
   const sender = replied?.sender;
   return String(sender?.user_id ?? replied?.user_id ?? "") === botUserId;
+}
+
+async function recoverMissingQqReplyTarget(
+  store: MessageStore,
+  onebot: OneBotClient,
+  messageId: string,
+  sourceType: SourceType,
+  targetId: string,
+  groupInfo: GroupInfo | null,
+  botUserId: string,
+): Promise<void> {
+  if (store.getMessage(messageId, "qq", sourceType, targetId)) {
+    return;
+  }
+  const fetched = await onebot.getMessage(messageId).catch((err) => {
+    warn("failed to recover missing qq reply target", {
+      messageId,
+      sourceType,
+      targetId,
+      error: String(err),
+    });
+    return null;
+  });
+  if (!fetched) {
+    return;
+  }
+  const recovered = buildRecoveredQqReplyMessage(
+    fetched,
+    groupInfo,
+    sourceType,
+    targetId,
+    botUserId,
+  );
+  if (!recovered) {
+    warn("ignored qq reply target from another conversation", {
+      messageId,
+      sourceType,
+      targetId,
+      fetchedSourceType: fetched.message_type,
+      fetchedGroupId: fetched.group_id == null ? null : String(fetched.group_id),
+    });
+    return;
+  }
+  const rowId = store.saveMessage(recovered);
+  log("recovered missing qq reply target", {
+    messageId: recovered.platformMessageId,
+    rowId,
+    sourceType,
+    targetId,
+    attachments: recovered.attachments.length,
+  });
 }
 
 main().catch((err) => {

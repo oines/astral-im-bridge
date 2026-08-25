@@ -17,6 +17,7 @@ test("MCP exposes only configured channels and capabilities", () => {
     qq: { enabled: true, botUserId: "123456" },
   }));
   assert.equal(qq.includes("qq_send_group_message"), true);
+  assert.equal(qq.includes("qq_get_forward_messages"), true);
   assert.equal(qq.includes("qq_send_group_voice"), false);
   assert.equal(qq.some((name) => name.startsWith("telegram_")), false);
 

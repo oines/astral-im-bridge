@@ -75,6 +75,10 @@ interface MessageRow extends Record<string, unknown> {
   reply_to_message_id: string | null;
 }
 
+interface MessageWithAttachments extends MessageRow {
+  attachments: Record<string, unknown>[];
+}
+
 interface RankedMessageRow extends MessageRow {
   rank?: number;
   bm25_rank?: number;
@@ -410,19 +414,20 @@ function searchResult(
   rows: RankedMessageRow[],
   contextLimit: number,
 ): Record<string, unknown> {
+  const hydratedRows = messagesWithAttachments(db, rows);
   return {
     query: text,
     mode,
-    returned_count: rows.length,
-    hits: rows.map((row) => {
+    returned_count: hydratedRows.length,
+    hits: hydratedRows.map((row) => {
       if (contextLimit === 0) {
         return row;
       }
       const nearby = neighboringMessages(db, row, contextLimit, contextLimit);
       return {
         ...row,
-        context_before: nearby.before,
-        context_after: nearby.after,
+        context_before: messagesWithAttachments(db, nearby.before),
+        context_after: messagesWithAttachments(db, nearby.after),
       };
     }),
   };
@@ -446,13 +451,14 @@ function queryMessages(db: DatabaseSync, rawOptions: QueryFilters): MessageRow[]
   const params: SqlValue[] = [];
   appendMessageFilters(clauses, params, options, "m");
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
-  return db.prepare(
+  const rows = db.prepare(
     `SELECT ${MESSAGE_SELECT}
      FROM messages AS m
      ${where}
      ORDER BY m.time ${order}, m.id ${order}
      LIMIT ?`,
   ).all(...params, limit) as unknown as MessageRow[];
+  return messagesWithAttachments(db, rows);
 }
 
 function messageContext(db: DatabaseSync, rawRowId: number, rawOptions: ContextOptions): Record<string, unknown> {
@@ -466,7 +472,7 @@ function messageContext(db: DatabaseSync, rawRowId: number, rawOptions: ContextO
     throw new Error(`Message row_id ${rowId} was not found`);
   }
   const nearby = neighboringMessages(db, target, beforeCount, afterCount);
-  const replyChain: Record<string, unknown>[] = [];
+  const replyChain: MessageRow[] = [];
   const seen = new Set<number>([target.row_id]);
   let current: MessageRow | null = target;
   while (current?.reply_to_message_id && replyChain.length < replyDepth) {
@@ -475,14 +481,14 @@ function messageContext(db: DatabaseSync, rawRowId: number, rawOptions: ContextO
       break;
     }
     seen.add(current.row_id);
-    replyChain.push(messageWithAttachments(db, current));
+    replyChain.push(current);
   }
 
   return {
     target: messageWithAttachments(db, target),
-    reply_chain: replyChain,
-    before: nearby.before,
-    after: nearby.after,
+    reply_chain: messagesWithAttachments(db, replyChain),
+    before: messagesWithAttachments(db, nearby.before),
+    after: messagesWithAttachments(db, nearby.after),
   };
 }
 
@@ -749,24 +755,50 @@ function messageByPlatformId(db: DatabaseSync, source: MessageRow, messageId: st
   return row ?? null;
 }
 
-function messageWithAttachments(db: DatabaseSync, message: MessageRow): Record<string, unknown> {
-  const attachments = db.prepare(
-    `SELECT
-       id AS attachment_id,
-       message_row_id,
-       kind,
-       file_id,
-       name,
-       url,
-       path,
-       mime_type,
-       size,
-       raw_json
-     FROM attachments
-     WHERE message_row_id = ?
-     ORDER BY id ASC`,
-  ).all(message.row_id) as Record<string, unknown>[];
-  return { ...message, attachments };
+function messageWithAttachments(db: DatabaseSync, message: MessageRow): MessageWithAttachments {
+  return messagesWithAttachments(db, [message])[0];
+}
+
+function messagesWithAttachments(
+  db: DatabaseSync,
+  messages: MessageRow[],
+): MessageWithAttachments[] {
+  if (messages.length === 0) {
+    return [];
+  }
+  const attachmentsByMessage = new Map<number, Record<string, unknown>[]>();
+  const rowIds = [...new Set(messages.map((message) => message.row_id))];
+  const chunkSize = 500;
+  for (let offset = 0; offset < rowIds.length; offset += chunkSize) {
+    const chunk = rowIds.slice(offset, offset + chunkSize);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const attachments = db.prepare(
+      `SELECT
+         id AS attachment_id,
+         message_row_id,
+         kind,
+         file_id,
+         name,
+         url,
+         path,
+         mime_type,
+         size,
+         raw_json
+       FROM attachments
+       WHERE message_row_id IN (${placeholders})
+       ORDER BY message_row_id ASC, id ASC`,
+    ).all(...chunk) as Record<string, unknown>[];
+    for (const attachment of attachments) {
+      const messageRowId = Number(attachment.message_row_id);
+      const grouped = attachmentsByMessage.get(messageRowId) ?? [];
+      grouped.push(attachment);
+      attachmentsByMessage.set(messageRowId, grouped);
+    }
+  }
+  return messages.map((message) => ({
+    ...message,
+    attachments: attachmentsByMessage.get(message.row_id) ?? [],
+  }));
 }
 
 function normalizeReadOnlySql(query: string): string {

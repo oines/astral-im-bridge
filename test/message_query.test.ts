@@ -65,6 +65,7 @@ test("query_messages exposes messages and live schema helpers", async () => {
   assert.equal(result.rows.length, 1);
   assert.equal(result.rows[0]?.message_id, "1");
   assert.equal(typeof result.rows[0]?.row_id, "number");
+  assert.deepEqual(result.rows[0]?.attachments, []);
   assert.ok(result.schema.tables[0]?.columns.some((column) => column.name === "raw_event_json"));
   assert.deepEqual(result.globals, { process: "undefined", require: "undefined" });
 });
@@ -120,7 +121,20 @@ test("query_messages context returns reply chain, attachments, and temporal neig
     rawMessage: "reply",
     replyToMessageId: "1",
   }));
-  store.saveMessage(makeMessage(3, { text: "after", rawMessage: "after" }));
+  store.saveMessage(makeMessage(3, {
+    text: "after",
+    rawMessage: "after",
+    attachments: [{
+      kind: "file",
+      fileId: "file-3",
+      name: "after.txt",
+      url: null,
+      path: "/tmp/after.txt",
+      mimeType: "text/plain",
+      size: 10,
+      raw: {},
+    }],
+  }));
 
   const result = await runMessageQuery(dbPath, `return context(${replyRowId}, { before: 1, after: 1 });`) as {
     target: Record<string, unknown>;
@@ -133,7 +147,57 @@ test("query_messages context returns reply chain, attachments, and temporal neig
   assert.equal(result.reply_chain[0]?.row_id, parentRowId);
   assert.equal((result.reply_chain[0]?.attachments as Array<Record<string, unknown>>)[0]?.name, "parent.png");
   assert.equal(result.before[0]?.message_id, "1");
+  assert.equal((result.before[0]?.attachments as Array<Record<string, unknown>>)[0]?.name, "parent.png");
   assert.equal(result.after[0]?.message_id, "3");
+  assert.equal((result.after[0]?.attachments as Array<Record<string, unknown>>)[0]?.name, "after.txt");
+});
+
+test("query_messages messages and search return attachments for every message shape", async () => {
+  const { dbPath, store } = createFixture();
+  store.saveMessage(makeMessage(1, {
+    text: "before",
+    attachments: [{
+      kind: "image",
+      fileId: "before-image",
+      name: "before.png",
+      url: "https://example.com/before.png",
+      path: null,
+      mimeType: "image/png",
+      size: 11,
+      raw: {},
+    }],
+  }));
+  store.saveMessage(makeMessage(2, {
+    text: "needle",
+    attachments: [{
+      kind: "image",
+      fileId: "hit-image",
+      name: "hit.png",
+      url: "https://example.com/hit.png",
+      path: null,
+      mimeType: "image/png",
+      size: 22,
+      raw: {},
+    }],
+  }));
+  store.saveMessage(makeMessage(3, { text: "after" }));
+
+  const result = await runMessageQuery(dbPath, `
+    return {
+      listed: messages({ message_id: "2" }),
+      found: search("needle", { mode: "lexical", context_limit: 1 }).hits,
+    };
+  `) as {
+    listed: Array<Record<string, unknown>>;
+    found: Array<Record<string, unknown>>;
+  };
+
+  assert.equal((result.listed[0]?.attachments as Array<Record<string, unknown>>)[0]?.name, "hit.png");
+  assert.equal((result.found[0]?.attachments as Array<Record<string, unknown>>)[0]?.name, "hit.png");
+  const before = result.found[0]?.context_before as Array<Record<string, unknown>>;
+  const after = result.found[0]?.context_after as Array<Record<string, unknown>>;
+  assert.equal((before[0]?.attachments as Array<Record<string, unknown>>)[0]?.name, "before.png");
+  assert.deepEqual(after[0]?.attachments, []);
 });
 
 test("query_messages conversations and SQL support custom aggregation without fixed row caps", async () => {
